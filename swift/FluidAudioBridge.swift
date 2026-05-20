@@ -21,6 +21,7 @@ class FluidAudioBridgeInternal {
     private var vadManager: VadManager?
     private var diarizerManager: OfflineDiarizerManager?
     private var streamingAsrManager: SlidingWindowAsrManager?
+    private var kokoroManager: KokoroTtsManager?
     // Qwen3 types require macOS 15 / iOS 18, so store as Any? and cast at call sites
     // guarded by `if #available(macOS 15, iOS 18, *)`.
     private var qwen3AsrManagerStorage: Any?
@@ -125,6 +126,67 @@ class FluidAudioBridgeInternal {
 
     func isAsrAvailable() -> Bool {
         return asrManager != nil
+    }
+
+    func initializeKokoro(defaultVoice: String) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        var initError: Error?
+
+        Task {
+            do {
+                let manager = KokoroTtsManager(defaultVoice: defaultVoice)
+                // initialize(preloadVoices:) downloads the Kokoro model on first run
+                // (FluidAudio-managed cache), matching the prior sidecar's behavior.
+                try await manager.initialize(preloadVoices: [defaultVoice])
+                self.kokoroManager = manager
+            } catch {
+                initError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = initError {
+            throw error
+        }
+    }
+
+    /// Synthesize `text` and return a complete WAV byte buffer (24 kHz mono f32),
+    /// exactly what `KokoroTtsManager.synthesize` produces.
+    func synthesizeKokoro(text: String, voice: String, speed: Float) throws -> Data {
+        guard let manager = kokoroManager else {
+            throw BridgeError.notInitialized
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Data?
+        var synthError: Error?
+
+        Task {
+            do {
+                result = try await manager.synthesize(text: text, voice: voice, voiceSpeed: speed)
+            } catch {
+                synthError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = synthError {
+            throw error
+        }
+
+        guard let data = result else {
+            throw BridgeError.noResult
+        }
+
+        return data
+    }
+
+    func isKokoroAvailable() -> Bool {
+        return kokoroManager != nil
     }
 
     func initializeVad(_ threshold: Float) throws {

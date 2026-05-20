@@ -352,6 +352,40 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    /// Initialize the Kokoro TTS engine with a default voice.
+    ///
+    /// Downloads the Kokoro model on first run (FluidAudio-managed cache).
+    pub fn init_kokoro(&self, default_voice: &str) -> Result<(), FluidAudioError> {
+        self.bridge
+            .initialize_kokoro(default_voice)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Synthesize English text via Kokoro TTS.
+    ///
+    /// # Arguments
+    /// * `text` - Text to synthesize
+    /// * `voice` - Kokoro voice id (e.g. `am_michael`)
+    /// * `speed` - Speech rate (0.5-2.0; clamped by FluidAudio)
+    ///
+    /// # Returns
+    /// * `Vec<u8>` - a complete WAV (24 kHz mono, 16-bit PCM)
+    pub fn synthesize_kokoro(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<Vec<u8>, FluidAudioError> {
+        self.bridge
+            .kokoro_synthesize(text, voice, speed)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Check if Kokoro TTS is initialized and ready.
+    pub fn is_kokoro_available(&self) -> bool {
+        self.bridge.is_kokoro_available()
+    }
+
     /// Diarize an audio file to identify speaker segments
     ///
     /// # Arguments
