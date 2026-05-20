@@ -21,15 +21,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("System: {} ({})", info.chip_name, info.platform);
     println!("Apple Silicon: {}\n", audio.is_apple_silicon());
 
-    println!(
-        "Initializing diarization (threshold={:.2}, may take a moment on first run)...",
-        threshold
-    );
-    audio.init_diarization(threshold)?;
-    println!("Diarization initialized!\n");
-
+    // If a model path (.mlpackage) is given as the 3rd arg, use the no-download
+    // model-path API; otherwise fall back to the auto-downloading path.
     println!("Diarizing: {}", audio_path);
-    let segments = audio.diarize_file(audio_path)?;
+    let segments = if let Some(model_path) = args.get(3) {
+        println!("Using pre-staged Sortformer model (no download): {model_path}");
+        audio.diarize_file_with_models(audio_path, model_path)?
+    } else {
+        println!(
+            "Initializing diarization (threshold={:.2}, downloads on first run)...",
+            threshold
+        );
+        audio.init_diarization(threshold)?;
+        audio.diarize_file(audio_path)?
+    };
 
     println!("\n--- Results ({} segments) ---\n", segments.len());
     for seg in &segments {

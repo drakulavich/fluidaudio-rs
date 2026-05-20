@@ -352,6 +352,33 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    /// Diarize an audio file using a pre-staged Sortformer model (`.mlpackage`
+    /// path), with **no** network download. The caller is responsible for
+    /// provisioning and verifying the model. Config is `.balancedV2` (matches
+    /// the `SortformerNvidiaLow_v2.mlpackage`). Unlike [`Self::diarize_file`],
+    /// this never touches HuggingFace and needs no prior `init_diarization`.
+    ///
+    /// # Arguments
+    /// * `audio` - Path to the audio file (WAV, M4A, MP3, etc.)
+    /// * `model_path` - Path to the Sortformer `.mlpackage`
+    pub fn diarize_file_with_models<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        audio: P,
+        model_path: Q,
+    ) -> Result<Vec<DiarizationSegment>, FluidAudioError> {
+        let audio_str = audio.as_ref().to_string_lossy();
+        if !audio.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(audio_str.to_string()));
+        }
+        let model_str = model_path.as_ref().to_string_lossy();
+        if !model_path.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(model_str.to_string()));
+        }
+        self.bridge
+            .diarize_file_with_models(&audio_str, &model_str)
+            .map_err(FluidAudioError::from)
+    }
+
     /// Diarize an audio file to identify speaker segments
     ///
     /// # Arguments

@@ -226,6 +226,61 @@ class FluidAudioBridgeInternal {
         }
     }
 
+    /// Diarize using a pre-staged Sortformer `.mlpackage` at `modelPath`. Loads
+    /// from disk via `SortformerDiarizer.initialize(mainModelPath:)`, so it never
+    /// downloads from HuggingFace — unlike `diarizeFile`, which uses the
+    /// auto-downloading OfflineDiarizerManager. Config is hardcoded to `.balancedV2`
+    /// to match the shipped `SortformerNvidiaLow_v2.mlpackage` (fifoLen=188); a
+    /// mismatched config is a hard CoreML tensor-shape error at runtime.
+    func diarizeFileWithModels(audioPath: String, modelPath: String) throws -> [BridgeDiarizationSegment] {
+        let semaphore = DispatchSemaphore(value: 0)
+        var timeline: DiarizerTimeline?
+        var diarizeError: Error?
+
+        Task {
+            do {
+                let diarizer = SortformerDiarizer(
+                    config: SortformerConfig.balancedV2,
+                    timelineConfig: DiarizerTimelineConfig.sortformerDefault
+                )
+                try await diarizer.initialize(mainModelPath: URL(fileURLWithPath: modelPath))
+                timeline = try diarizer.processComplete(
+                    audioFileURL: URL(fileURLWithPath: audioPath),
+                    keepingEnrolledSpeakers: nil,
+                    finalizeOnCompletion: true,
+                    progressCallback: nil
+                )
+            } catch {
+                diarizeError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = diarizeError {
+            throw error
+        }
+
+        guard let tl = timeline else {
+            throw BridgeError.noResult
+        }
+
+        // DiarizerTimeline.speakers: [Int: DiarizerSpeaker]; flatten finalized
+        // segments across speakers and sort by start time.
+        let allSegments = tl.speakers.values.flatMap { $0.finalizedSegments }
+        return allSegments
+            .sorted { $0.startTime < $1.startTime }
+            .map { seg in
+                BridgeDiarizationSegment(
+                    speakerId: String(format: "SPEAKER_%02d", max(0, seg.speakerIndex)),
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    qualityScore: 1.0
+                )
+            }
+    }
+
     func isDiarizationAvailable() -> Bool {
         return diarizerManager != nil
     }
