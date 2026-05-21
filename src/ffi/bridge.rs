@@ -206,6 +206,13 @@ extern "C" {
         out_quality_scores: *mut *mut f32,
         out_count: *mut u32,
     ) -> i32;
+
+    // Pre-compile the diarization .mlpackage to its stable .mlmodelc sibling
+    // and load it once (warm-up; populates the CoreML ANE/e5rt cache).
+    fn fluidaudio_compile_diarization_model(
+        bridge: *mut std::ffi::c_void,
+        model_path: *const i8,
+    ) -> i32;
 }
 
 use std::ffi::{CStr, CString};
@@ -283,6 +290,18 @@ impl FluidAudioBridge {
 
     pub fn is_kokoro_available(&self) -> bool {
         unsafe { fluidaudio_is_kokoro_available(self.ptr) != 0 }
+    }
+
+    /// Pre-compile the diarization `.mlpackage` to its stable `.mlmodelc` sibling
+    /// and load it once (warm-up). Populates the CoreML ANE/e5rt cache so the first
+    /// real diarize is fast. No audio is processed.
+    pub fn compile_diarization_model(&self, model_path: &str) -> Result<(), String> {
+        let c_model = CString::new(model_path).map_err(|_| "Invalid model path")?;
+        let result = unsafe { fluidaudio_compile_diarization_model(self.ptr, c_model.as_ptr()) };
+        if result != 0 {
+            return Err("Diarization model warm-up (compile) failed".to_string());
+        }
+        Ok(())
     }
 
     /// Diarize from a pre-staged Sortformer `.mlpackage` — no network download.

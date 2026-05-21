@@ -413,6 +413,27 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    /// Pre-compile the Sortformer `.mlpackage` to its stable `.mlmodelc` sibling
+    /// (`<model_path>.mlmodelc`) and load it once, populating CoreML's ANE (e5rt)
+    /// cache. Lets callers pay the one-time ~100s ANE compile up front (e.g. at
+    /// install time) so the first real [`Self::diarize_file_with_models`] is fast
+    /// (~4s) instead of recompiling on every call. No audio is processed.
+    ///
+    /// # Arguments
+    /// * `model_path` - Path to the Sortformer `.mlpackage`
+    pub fn compile_diarization_model<Q: AsRef<Path>>(
+        &self,
+        model_path: Q,
+    ) -> Result<(), FluidAudioError> {
+        let model_str = model_path.as_ref().to_string_lossy();
+        if !model_path.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(model_str.to_string()));
+        }
+        self.bridge
+            .compile_diarization_model(&model_str)
+            .map_err(FluidAudioError::from)
+    }
+
     /// Diarize an audio file to identify speaker segments
     ///
     /// # Arguments
