@@ -60,3 +60,26 @@ public func fluidaudio_diarize_file_with_models(
         return -1
     }
 }
+
+// MARK: - Warm-up: pre-compile the diarization model
+//
+// Compile the pre-staged Sortformer `.mlpackage` to its stable `.mlmodelc` sibling
+// and load it once, paying the one-time ~100s ANE compile up front (populates the
+// e5rt cache). Callers warm this at install time so the first real diarize is fast.
+
+@_cdecl("fluidaudio_compile_diarization_model")
+public func fluidaudio_compile_diarization_model(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ modelPath: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let ptr = ptr, let modelPath = modelPath else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+
+    do {
+        try bridge.compileDiarizationModel(modelPath: String(cString: modelPath))
+        return 0
+    } catch {
+        print("Compile diarization model error: \(error)")
+        return -1
+    }
+}
