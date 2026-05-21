@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreML
 import FluidAudio
 import Darwin
 
@@ -226,12 +227,46 @@ class FluidAudioBridgeInternal {
         }
     }
 
+    /// Load the Sortformer model from a pre-staged `.mlpackage`, caching the
+    /// compiled `.mlmodelc` at a STABLE sibling path (`<modelPath>.mlmodelc`).
+    ///
+    /// `SortformerModels.load()` recompiles the `.mlpackage` to a *throwaway temp*
+    /// `.mlmodelc` on every call. The ~100s cost is the CoreML ANE program compile
+    /// inside `MLModel(contentsOf:, .all)`, which Apple caches in
+    /// `~/Library/Caches/com.apple.e5rt.e5bundlecache` keyed to the compiled
+    /// model's path — so a fresh temp path every run is a cache miss every run.
+    /// Loading from a stable path makes the 2nd process onward ~4s (measured: cold
+    /// 104.7s, warm 3.9s on M3 Pro). `MLModel.compileModel` itself is ~0.3s.
+    /// Config is `.balancedV2` to match `SortformerNvidiaLow_v2.mlpackage`.
+    private static func loadSortformerCached(modelPath: String) async throws -> SortformerModels {
+        let mlpackageURL = URL(fileURLWithPath: modelPath)
+        let stableURL = URL(fileURLWithPath: modelPath + ".mlmodelc")
+        let fm = FileManager.default
+
+        if !fm.fileExists(atPath: stableURL.path) {
+            let compiled = try await MLModel.compileModel(at: mlpackageURL)
+            do {
+                try fm.moveItem(at: compiled, to: stableURL)
+            } catch {
+                // Another process may have published the stable model first.
+                // If it now exists, use it; otherwise the move genuinely failed.
+                if !fm.fileExists(atPath: stableURL.path) { throw error }
+                try? fm.removeItem(at: compiled)
+            }
+        }
+
+        let cfg = MLModelConfiguration()
+        cfg.computeUnits = .all
+        let model = try MLModel(contentsOf: stableURL, configuration: cfg)
+        return try SortformerModels(config: SortformerConfig.balancedV2, main: model)
+    }
+
     /// Diarize using a pre-staged Sortformer `.mlpackage` at `modelPath`. Loads
-    /// from disk via `SortformerDiarizer.initialize(mainModelPath:)`, so it never
-    /// downloads from HuggingFace — unlike `diarizeFile`, which uses the
-    /// auto-downloading OfflineDiarizerManager. Config is hardcoded to `.balancedV2`
-    /// to match the shipped `SortformerNvidiaLow_v2.mlpackage` (fifoLen=188); a
-    /// mismatched config is a hard CoreML tensor-shape error at runtime.
+    /// from a stable compiled `.mlmodelc` sibling via `loadSortformerCached`, so it
+    /// never downloads from HuggingFace — unlike `diarizeFile`, which uses the
+    /// auto-downloading OfflineDiarizerManager. Config is `.balancedV2` to match
+    /// the shipped `SortformerNvidiaLow_v2.mlpackage` (fifoLen=188); a mismatched
+    /// config is a hard CoreML tensor-shape error at runtime.
     func diarizeFileWithModels(audioPath: String, modelPath: String) throws -> [BridgeDiarizationSegment] {
         let semaphore = DispatchSemaphore(value: 0)
         var timeline: DiarizerTimeline?
@@ -243,7 +278,8 @@ class FluidAudioBridgeInternal {
                     config: SortformerConfig.balancedV2,
                     timelineConfig: DiarizerTimelineConfig.sortformerDefault
                 )
-                try await diarizer.initialize(mainModelPath: URL(fileURLWithPath: modelPath))
+                let models = try await Self.loadSortformerCached(modelPath: modelPath)
+                diarizer.initialize(models: models)
                 timeline = try diarizer.processComplete(
                     audioFileURL: URL(fileURLWithPath: audioPath),
                     keepingEnrolledSpeakers: nil,
@@ -279,6 +315,30 @@ class FluidAudioBridgeInternal {
                     qualityScore: 1.0
                 )
             }
+    }
+
+    /// Pre-compile the Sortformer `.mlpackage` to its stable `.mlmodelc` sibling and
+    /// load it once with `.all`, paying the one-time ~100s ANE compile and populating
+    /// the e5rt cache. Lets callers warm at install time so the first real diarize is
+    /// fast. No audio is processed.
+    func compileDiarizationModel(modelPath: String) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        var compileError: Error?
+
+        Task {
+            do {
+                _ = try await Self.loadSortformerCached(modelPath: modelPath)
+            } catch {
+                compileError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = compileError {
+            throw error
+        }
     }
 
     func isDiarizationAvailable() -> Bool {
