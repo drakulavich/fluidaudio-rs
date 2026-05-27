@@ -22,7 +22,7 @@ class FluidAudioBridgeInternal {
     private var vadManager: VadManager?
     private var diarizerManager: OfflineDiarizerManager?
     private var streamingAsrManager: SlidingWindowAsrManager?
-    private var kokoroManager: KokoroTtsManager?
+    private var kokoroManager: KokoroAneManager?
     // Qwen3 types require macOS 15 / iOS 18, so store as Any? and cast at call sites
     // guarded by `if #available(macOS 15, iOS 18, *)`.
     private var qwen3AsrManagerStorage: Any?
@@ -135,9 +135,14 @@ class FluidAudioBridgeInternal {
 
         Task {
             do {
-                let manager = KokoroTtsManager(defaultVoice: defaultVoice)
-                // initialize(preloadVoices:) downloads the Kokoro model on first run
-                // (FluidAudio-managed cache), matching the prior sidecar's behavior.
+                // FluidAudio 0.14.7 replaced the mono `KokoroTtsManager` with the
+                // ANE-resident `KokoroAneManager` (variant `.english`). Its
+                // `synthesize(speed:)` feeds speed as a real model input tensor,
+                // so `kesha say --rate` now actually applies (the prior
+                // `voiceSpeed:` path was a runtime no-op).
+                let manager = KokoroAneManager(variant: .english, defaultVoice: defaultVoice)
+                // initialize(preloadVoices:) downloads the model + voice packs on
+                // first run (FluidAudio-managed cache), matching prior behavior.
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {
@@ -153,8 +158,10 @@ class FluidAudioBridgeInternal {
         }
     }
 
-    /// Synthesize `text` and return a complete WAV byte buffer (24 kHz mono f32),
-    /// exactly what `KokoroTtsManager.synthesize` produces.
+    /// Synthesize `text` and return a complete WAV byte buffer (24 kHz mono),
+    /// exactly what `KokoroAneManager.synthesize` produces. `speed` (1.0 =
+    /// normal) is fed to the model as a real input tensor, so it genuinely
+    /// applies — unlike the removed `KokoroTtsManager.synthesize(voiceSpeed:)`.
     func synthesizeKokoro(text: String, voice: String, speed: Float) throws -> Data {
         guard let manager = kokoroManager else {
             throw BridgeError.notInitialized
@@ -166,7 +173,7 @@ class FluidAudioBridgeInternal {
 
         Task {
             do {
-                result = try await manager.synthesize(text: text, voice: voice, voiceSpeed: speed)
+                result = try await manager.synthesize(text: text, voice: voice, speed: speed)
             } catch {
                 synthError = error
             }

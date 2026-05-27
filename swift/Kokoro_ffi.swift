@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Kokoro TTS C FFI
 //
-// Native Rust binding for FluidAudio's KokoroTtsManager. Mirrors the ASR/diarize
+// Native Rust binding for FluidAudio's KokoroAneManager. Mirrors the ASR/diarize
 // @_cdecl pattern in FluidAudioBridge.swift: recover the bridge from the opaque
 // pointer, call the (synchronous) internal method, marshal the result out.
 
