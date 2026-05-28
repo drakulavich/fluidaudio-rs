@@ -256,7 +256,7 @@ impl FluidAudioBridge {
     }
 
     /// Synthesize `text` with `voice` at `speed`; returns the complete WAV bytes
-    /// produced by FluidAudio's KokoroTtsManager (24 kHz mono f32).
+    /// produced by FluidAudio's KokoroAneManager (24 kHz mono 16-bit PCM (i16), peak-normalized).
     pub fn kokoro_synthesize(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<u8>, String> {
         let c_text = CString::new(text).map_err(|_| "Invalid text")?;
         let c_voice = CString::new(voice).map_err(|_| "Invalid voice")?;

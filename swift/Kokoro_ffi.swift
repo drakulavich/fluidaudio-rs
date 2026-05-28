@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Kokoro TTS C FFI
 //
-// Native Rust binding for FluidAudio's KokoroTtsManager. Mirrors the ASR/diarize
+// Native Rust binding for FluidAudio's KokoroAneManager. Mirrors the ASR/diarize
 // @_cdecl pattern in FluidAudioBridge.swift: recover the bridge from the opaque
 // pointer, call the (synchronous) internal method, marshal the result out.
 
@@ -13,7 +13,7 @@ public func fluidaudio_initialize_kokoro(
 ) -> Int32 {
     guard let ptr = ptr else { return -1 }
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
-    let voice = defaultVoice.map { String(cString: $0) } ?? "am_michael"
+    let voice = defaultVoice.map { String(cString: $0) } ?? "af_heart"
     do {
         try bridge.initializeKokoro(defaultVoice: voice)
         return 0
@@ -24,7 +24,7 @@ public func fluidaudio_initialize_kokoro(
 }
 
 /// Synthesize `text` with `voice` at `speed`; returns a complete WAV byte buffer
-/// (24 kHz mono f32) via `outBytes`/`outLen`. The caller owns the buffer and must
+/// (24 kHz mono 16-bit PCM (i16), peak-normalized) via `outBytes`/`outLen`. The caller owns the buffer and must
 /// free it with `fluidaudio_kokoro_free_bytes`.
 @_cdecl("fluidaudio_kokoro_synthesize")
 public func fluidaudio_kokoro_synthesize(
@@ -38,7 +38,7 @@ public func fluidaudio_kokoro_synthesize(
     guard let ptr = ptr, let text = text else { return -1 }
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
     let textString = String(cString: text)
-    let voiceString = voice.map { String(cString: $0) } ?? "am_michael"
+    let voiceString = voice.map { String(cString: $0) } ?? "af_heart"
     do {
         let data = try bridge.synthesizeKokoro(text: textString, voice: voiceString, speed: speed)
         let count = data.count
