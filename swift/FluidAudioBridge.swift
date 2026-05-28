@@ -135,14 +135,9 @@ class FluidAudioBridgeInternal {
 
         Task {
             do {
-                // FluidAudio 0.14.7 replaced the mono `KokoroTtsManager` with the
-                // ANE-resident `KokoroAneManager` (variant `.english`). Its
-                // `synthesize(speed:)` feeds speed as a real model input tensor,
-                // so `kesha say --rate` now actually applies (the prior
-                // `voiceSpeed:` path was a runtime no-op).
+                // `KokoroAneManager` feeds `speed` as a real model input tensor,
+                // so `--rate` applies correctly (unlike the prior `voiceSpeed:` path).
                 let manager = KokoroAneManager(variant: .english, defaultVoice: defaultVoice)
-                // initialize(preloadVoices:) downloads the model + voice packs on
-                // first run (FluidAudio-managed cache), matching prior behavior.
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {
