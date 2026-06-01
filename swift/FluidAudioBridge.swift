@@ -129,7 +129,20 @@ class FluidAudioBridgeInternal {
         return asrManager != nil
     }
 
-    func initializeKokoro(defaultVoice: String) throws {
+    /// Map a kesha/espeak-style language tag to a KokoroAne variant. FluidAudio
+    /// 0.14.8 ships exactly two KokoroAne variants — `.english` and `.mandarin`
+    /// — so `zh` selects Mandarin (its own tone-aware G2P) and everything else
+    /// (en plus the Latin-script es/fr/it/pt, which synthesize acceptably through
+    /// the English G2P) falls back to `.english`.
+    private static func kokoroVariant(for lang: String) -> KokoroAneVariant {
+        let base = lang.lowercased().split(separator: "-").first.map(String.init) ?? ""
+        switch base {
+        case "zh": return .mandarin
+        default: return .english
+        }
+    }
+
+    func initializeKokoro(defaultVoice: String, lang: String) throws {
         let semaphore = DispatchSemaphore(value: 0)
         var initError: Error?
 
@@ -137,7 +150,8 @@ class FluidAudioBridgeInternal {
             do {
                 // `KokoroAneManager` feeds `speed` as a real model input tensor,
                 // so `--rate` applies correctly (unlike the prior `voiceSpeed:` path).
-                let manager = KokoroAneManager(variant: .english, defaultVoice: defaultVoice)
+                let variant = Self.kokoroVariant(for: lang)
+                let manager = KokoroAneManager(variant: variant, defaultVoice: defaultVoice)
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {

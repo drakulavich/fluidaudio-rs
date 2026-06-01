@@ -183,7 +183,11 @@ extern "C" {
     fn fluidaudio_free_string(s: *mut i8);
 
     // Kokoro TTS
-    fn fluidaudio_initialize_kokoro(bridge: *mut std::ffi::c_void, default_voice: *const i8) -> i32;
+    fn fluidaudio_initialize_kokoro(
+        bridge: *mut std::ffi::c_void,
+        default_voice: *const i8,
+        lang: *const i8,
+    ) -> i32;
     fn fluidaudio_kokoro_synthesize(
         bridge: *mut std::ffi::c_void,
         text: *const i8,
@@ -245,9 +249,11 @@ impl FluidAudioBridge {
         }
     }
 
-    pub fn initialize_kokoro(&self, default_voice: &str) -> Result<(), String> {
+    pub fn initialize_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), String> {
         let c_voice = CString::new(default_voice).map_err(|_| "Invalid voice")?;
-        let result = unsafe { fluidaudio_initialize_kokoro(self.ptr, c_voice.as_ptr()) };
+        let c_lang = CString::new(lang).map_err(|_| "Invalid lang")?;
+        let result =
+            unsafe { fluidaudio_initialize_kokoro(self.ptr, c_voice.as_ptr(), c_lang.as_ptr()) };
         if result == 0 {
             Ok(())
         } else {

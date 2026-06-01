@@ -9,13 +9,15 @@ import Foundation
 @_cdecl("fluidaudio_initialize_kokoro")
 public func fluidaudio_initialize_kokoro(
     _ ptr: UnsafeMutableRawPointer?,
-    _ defaultVoice: UnsafePointer<CChar>?
+    _ defaultVoice: UnsafePointer<CChar>?,
+    _ lang: UnsafePointer<CChar>?
 ) -> Int32 {
     guard let ptr = ptr else { return -1 }
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
     let voice = defaultVoice.map { String(cString: $0) } ?? "af_heart"
+    let langString = lang.map { String(cString: $0) } ?? ""
     do {
-        try bridge.initializeKokoro(defaultVoice: voice)
+        try bridge.initializeKokoro(defaultVoice: voice, lang: langString)
         return 0
     } catch {
         print("Kokoro init error: \(error)")

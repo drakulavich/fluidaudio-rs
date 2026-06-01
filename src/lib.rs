@@ -352,12 +352,14 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
-    /// Initialize the Kokoro TTS engine with a default voice.
+    /// Initialize the Kokoro TTS engine with a default voice and language.
     ///
-    /// Downloads the Kokoro model on first run (FluidAudio-managed cache).
-    pub fn init_kokoro(&self, default_voice: &str) -> Result<(), FluidAudioError> {
+    /// `lang` selects the KokoroAne variant in the Swift bridge (`zh` → Mandarin,
+    /// everything else → English). Downloads the variant's model on first run
+    /// (FluidAudio-managed cache).
+    pub fn init_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), FluidAudioError> {
         self.bridge
-            .initialize_kokoro(default_voice)
+            .initialize_kokoro(default_voice, lang)
             .map_err(FluidAudioError::from)
     }
 
