@@ -363,7 +363,9 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
-    /// Synthesize English text via Kokoro TTS.
+    /// Synthesize text via Kokoro TTS in the language the engine was initialized
+    /// with (`init_kokoro`'s `lang`): English by default, or Mandarin when
+    /// `lang` was `zh` (the `.mandarin` KokoroAne variant).
     ///
     /// # Arguments
     /// * `text` - Text to synthesize
