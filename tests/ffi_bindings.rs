@@ -267,3 +267,64 @@ fn asr_transcribes_silence_buffer() {
     let result = audio.transcribe_samples(&samples).expect("transcribe");
     assert!(result.duration >= 1.9 && result.duration <= 2.1);
 }
+
+/// Regression test for the bug where `transcribe_file` / `transcribe_samples`
+/// carried decoder state across calls: the TDT decoder's LSTM hidden/cell
+/// tensors and `lastToken` were stored in the bridge between invocations,
+/// biasing the next call's predictor with the previous call's
+/// end-of-utterance state. In practice this collapsed the second and
+/// subsequent transcripts to a lone "." (the previous call's terminal
+/// punctuation).
+///
+/// We transcribe a short shipped WAV fixture twice in a row and assert:
+///
+///   1. The first transcript is non-empty and matches the spoken phrase
+///      (sanity: the model is actually running).
+///   2. The second transcript equals the first byte-for-byte.
+///
+/// Under the bug, (1) holds but (2) fails — the second result is some
+/// degenerate suffix of the first (typically just ".").
+///
+/// The fixture (`tests/fixtures/hello.wav`) was generated on macOS with:
+///
+///     say -v Samantha --file-format=WAVE --data-format=LEI16@16000 \
+///         -o tests/fixtures/hello.wav "Hello world, this is a test."
+///
+/// Apple's TTS output isn't subject to third-party licensing; regenerating
+/// it on any macOS host produces a comparable clip.
+#[test]
+#[ignore = "downloads Parakeet TDT models (~600MB) and triggers ANE compilation"]
+fn asr_transcribe_file_is_stateless_across_calls() {
+    let audio = FluidAudio::new().expect("bridge creation");
+    audio.init_asr().expect("ASR init");
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hello.wav");
+    assert!(
+        fixture.exists(),
+        "fixture not found at {:?}",
+        fixture
+    );
+
+    let first = audio.transcribe_file(&fixture).expect("first transcribe");
+    let second = audio.transcribe_file(&fixture).expect("second transcribe");
+
+    // Sanity: the model produced something for our spoken phrase. We don't
+    // pin the exact transcript (model versions and TTS voices vary) — just
+    // that it ran.
+    let first_lower = first.text.to_lowercase();
+    assert!(
+        first_lower.contains("hello") || first_lower.contains("test"),
+        "first transcript should reference the spoken phrase, got {:?}",
+        first.text,
+    );
+
+    // The actual regression assertion.
+    assert_eq!(
+        first.text, second.text,
+        "consecutive transcribe_file calls must yield identical output on \
+         identical input; got {:?} then {:?}. Decoder state is leaking \
+         between calls.",
+        first.text, second.text,
+    );
+}

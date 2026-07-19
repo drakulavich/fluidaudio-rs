@@ -61,9 +61,17 @@ class FluidAudioBridgeInternal {
     }
 
     func transcribeFile(_ path: String) throws -> (String, Float, Double, Double, Float) {
-        guard let manager = asrManager, var decoderState = asrDecoderState else {
+        // One-shot transcription: each call starts with a fresh decoder state so
+        // results don't leak across utterances. The TDT decoder's LSTM hidden/cell
+        // state and `lastToken` would otherwise persist, biasing the next call's
+        // predictor (e.g. priming it with end-of-sentence punctuation, which
+        // collapses subsequent transcripts to ".").
+        // Streaming-style chunked decoding is exposed separately via the
+        // streaming ASR API (`streaming_asr_*`), which manages state explicitly.
+        guard let manager = asrManager else {
             throw BridgeError.notInitialized
         }
+        var decoderState = try TdtDecoderState()
 
         let semaphore = DispatchSemaphore(value: 0)
         var result: ASRResult?
@@ -80,7 +88,6 @@ class FluidAudioBridgeInternal {
         }
 
         semaphore.wait()
-        self.asrDecoderState = decoderState
 
         if let error = transcribeError {
             throw error
@@ -94,9 +101,11 @@ class FluidAudioBridgeInternal {
     }
 
     func transcribeSamples(_ samples: [Float]) throws -> (String, Float, Double, Double, Float) {
-        guard let manager = asrManager, var decoderState = asrDecoderState else {
+        // See `transcribeFile` for the rationale: fresh decoder state per call.
+        guard let manager = asrManager else {
             throw BridgeError.notInitialized
         }
+        var decoderState = try TdtDecoderState()
 
         let semaphore = DispatchSemaphore(value: 0)
         var result: ASRResult?
@@ -112,7 +121,6 @@ class FluidAudioBridgeInternal {
         }
 
         semaphore.wait()
-        self.asrDecoderState = decoderState
 
         if let error = transcribeError {
             throw error
