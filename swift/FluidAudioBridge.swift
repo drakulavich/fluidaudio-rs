@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import CoreML
+import CryptoKit
 import FluidAudio
 import Darwin
 
@@ -21,6 +23,11 @@ class FluidAudioBridgeInternal {
     private var vadManager: VadManager?
     private var diarizerManager: OfflineDiarizerManager?
     private var streamingAsrManager: SlidingWindowAsrManager?
+    // Model-path diarization: retain the loaded MLModel (the ~4s-to-load part) keyed by
+    // model path so repeated in-process diarize calls skip the reload. Guarded by a lock
+    // — the Rust bridge is Send+Sync and may be entered concurrently from multiple threads.
+    private let sortformerCacheLock = NSLock()
+    private var sortformerModelCache: [String: MLModel] = [:]
     // Qwen3 types require macOS 15 / iOS 18, so store as Any? and cast at call sites
     // guarded by `if #available(macOS 15, iOS 18, *)`.
     private var qwen3AsrManagerStorage: Any?
@@ -223,6 +230,179 @@ class FluidAudioBridgeInternal {
                 endTime: segment.endTimeSeconds,
                 qualityScore: segment.qualityScore
             )
+        }
+    }
+
+    /// Resolve the pre-staged `.mlpackage` at `modelPath` to a compiled `.mlmodelc` in a
+    /// WRITABLE per-user cache — never next to the model, which may live in a read-only /
+    /// air-gapped location. `MLModel.compileModel` recompiles to a throwaway temp on every
+    /// call; the ~100s cost is the CoreML ANE program compile inside `MLModel(contentsOf:,
+    /// .all)`, which Apple caches in `com.apple.e5rt.e5bundlecache` keyed to the compiled
+    /// model's path — so a *stable* path makes the 2nd process onward ~4s (measured: cold
+    /// 104.7s, warm 3.9s on M3 Pro). The path is keyed by a content hash of the package, so
+    /// swapping a different model in at the same path invalidates the stale artifact.
+    private static func compiledModelURL(forModelPath modelPath: String) async throws -> URL {
+        let mlpackageURL = URL(fileURLWithPath: modelPath)
+        let stableURL = try compiledCacheDir()
+            .appendingPathComponent(cacheKey(forModelPath: modelPath) + ".mlmodelc")
+        let fm = FileManager.default
+
+        if !fm.fileExists(atPath: stableURL.path) {
+            let compiled = try await MLModel.compileModel(at: mlpackageURL)
+            do {
+                try fm.moveItem(at: compiled, to: stableURL)
+            } catch {
+                // Another process may have published it first; or the temp dir and the
+                // cache live on different volumes (EXDEV), where moveItem can't rename.
+                if !fm.fileExists(atPath: stableURL.path) {
+                    do { try fm.copyItem(at: compiled, to: stableURL) }
+                    catch { if !fm.fileExists(atPath: stableURL.path) { throw error } }
+                }
+                try? fm.removeItem(at: compiled)
+            }
+        }
+        return stableURL
+    }
+
+    /// Writable cache dir for compiled Sortformer models: Application Support (not
+    /// `.cachesDirectory`, which the OS may reclaim — recompiling costs ~100s).
+    private static func compiledCacheDir() throws -> URL {
+        let base = try FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true)
+        let dir = base.appendingPathComponent("fluidaudio-rs/SortformerCompiled", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// SHA-256 of `<path>|<recursive size>|<newest mtime>`. Size+mtime invalidate the
+    /// compiled artifact if a different model is staged at the same path; `.mlpackage` is a
+    /// directory bundle, so the fingerprint walks its contents rather than stat-ing the dir.
+    private static func cacheKey(forModelPath modelPath: String) -> String {
+        let url = URL(fileURLWithPath: modelPath).standardizedFileURL
+        var totalSize: Int64 = 0
+        var newestMtime: TimeInterval = 0
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
+        if let en = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys)) {
+            for case let file as URL in en {
+                guard let v = try? file.resourceValues(forKeys: keys) else { continue }
+                totalSize += Int64(v.fileSize ?? 0)
+                if let m = v.contentModificationDate?.timeIntervalSince1970, m > newestMtime {
+                    newestMtime = m
+                }
+            }
+        }
+        let material = "\(url.path)|\(totalSize)|\(Int(newestMtime))"
+        let digest = SHA256.hash(data: Data(material.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Return a loaded `MLModel` for `modelPath`, retained on the bridge so repeated
+    /// in-process diarizations skip the ~4s `MLModel(contentsOf:)` load. Double-checked
+    /// under `sortformerCacheLock`; the lock is never held across the `await` compile/load.
+    /// We cache the `MLModel` (thread-safe, expensive to load) and build a fresh
+    /// `SortformerModels` per call — `SortformerModels` owns mutable scratch buffers that
+    /// must not be shared across concurrent diarizations.
+    private func cachedSortformerModel(modelPath: String) async throws -> MLModel {
+        sortformerCacheLock.lock()
+        if let cached = sortformerModelCache[modelPath] {
+            sortformerCacheLock.unlock()
+            return cached
+        }
+        sortformerCacheLock.unlock()
+
+        let url = try await Self.compiledModelURL(forModelPath: modelPath)
+        let cfg = MLModelConfiguration()
+        cfg.computeUnits = .all
+        let model = try MLModel(contentsOf: url, configuration: cfg)
+
+        sortformerCacheLock.lock()
+        defer { sortformerCacheLock.unlock() }
+        if let existing = sortformerModelCache[modelPath] { return existing }
+        sortformerModelCache[modelPath] = model
+        return model
+    }
+
+    /// Diarize using a pre-staged Sortformer `.mlpackage` at `modelPath`. The compiled
+    /// model is cached in a writable per-user dir and retained in-memory
+    /// (`cachedSortformerModel`), so repeated in-process calls skip the reload; it never
+    /// downloads from HuggingFace — unlike `diarizeFile`, which uses the auto-downloading
+    /// OfflineDiarizerManager. Config is `.balancedV2` to match the shipped
+    /// `SortformerNvidiaLow_v2.mlpackage` (fifoLen=188); a mismatched config is a hard
+    /// CoreML tensor-shape error at runtime.
+    func diarizeFileWithModels(audioPath: String, modelPath: String) throws -> [BridgeDiarizationSegment] {
+        let semaphore = DispatchSemaphore(value: 0)
+        var timeline: DiarizerTimeline?
+        var diarizeError: Error?
+
+        Task {
+            do {
+                let diarizer = SortformerDiarizer(
+                    config: SortformerConfig.balancedV2,
+                    timelineConfig: DiarizerTimelineConfig.sortformerDefault
+                )
+                let model = try await self.cachedSortformerModel(modelPath: modelPath)
+                let models = try SortformerModels(config: SortformerConfig.balancedV2, main: model)
+                diarizer.initialize(models: models)
+                timeline = try diarizer.processComplete(
+                    audioFileURL: URL(fileURLWithPath: audioPath),
+                    keepingEnrolledSpeakers: nil,
+                    finalizeOnCompletion: true,
+                    progressCallback: nil
+                )
+            } catch {
+                diarizeError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = diarizeError {
+            throw error
+        }
+
+        guard let tl = timeline else {
+            throw BridgeError.noResult
+        }
+
+        // DiarizerTimeline.speakers: [Int: DiarizerSpeaker]; flatten finalized
+        // segments across speakers and sort by start time.
+        let allSegments = tl.speakers.values.flatMap { $0.finalizedSegments }
+        return allSegments
+            .sorted { $0.startTime < $1.startTime }
+            .map { seg in
+                BridgeDiarizationSegment(
+                    speakerId: String(format: "SPEAKER_%02d", max(0, seg.speakerIndex)),
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    qualityScore: 1.0
+                )
+            }
+    }
+
+    /// Warm the diarization model: compile the `.mlpackage` into the writable per-user
+    /// cache (one-time ~100s ANE compile, populates the e5rt cache) and load it once,
+    /// retaining the handle in-memory. Callers warm this at install time so the first real
+    /// diarize is fast — ~4s cross-process, or no reload at all in-process. No audio is
+    /// processed; the caller's model directory is never written to.
+    func compileDiarizationModel(modelPath: String) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        var compileError: Error?
+
+        Task {
+            do {
+                _ = try await self.cachedSortformerModel(modelPath: modelPath)
+            } catch {
+                compileError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = compileError {
+            throw error
         }
     }
 
@@ -735,6 +915,9 @@ class FluidAudioBridgeInternal {
         asrDecoderState = nil
         vadManager = nil
         diarizerManager = nil
+        sortformerCacheLock.lock()
+        sortformerModelCache.removeAll()
+        sortformerCacheLock.unlock()
         streamingAsrManager = nil
         qwen3AsrManagerStorage = nil
         qwen3StreamingManagerStorage = nil

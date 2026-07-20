@@ -352,6 +352,64 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    /// Diarize an audio file using a pre-staged Sortformer model (`.mlpackage`
+    /// path), with **no** network download. The caller is responsible for
+    /// provisioning and verifying the model. Config is `.balancedV2` (matches
+    /// the `SortformerNvidiaLow_v2.mlpackage`). Unlike [`Self::diarize_file`],
+    /// this never touches HuggingFace and needs no prior `init_diarization`.
+    ///
+    /// The compiled model is cached in a writable per-user directory (never next
+    /// to `model_path`, so a read-only / air-gapped model location works) and the
+    /// loaded handle is retained in-memory, so repeated calls in the same process
+    /// reuse it with no reload.
+    ///
+    /// # Arguments
+    /// * `audio` - Path to the audio file (WAV, M4A, MP3, etc.)
+    /// * `model_path` - Path to the Sortformer `.mlpackage`
+    pub fn diarize_file_with_models<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        audio: P,
+        model_path: Q,
+    ) -> Result<Vec<DiarizationSegment>, FluidAudioError> {
+        let audio_str = audio.as_ref().to_string_lossy();
+        if !audio.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(audio_str.to_string()));
+        }
+        let model_str = model_path.as_ref().to_string_lossy();
+        if !model_path.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(model_str.to_string()));
+        }
+        self.bridge
+            .diarize_file_with_models(&audio_str, &model_str)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Pre-compile the Sortformer `.mlpackage` and warm it, so the first real
+    /// diarization is fast. The compiled `.mlmodelc` is written to a writable
+    /// per-user cache directory (keyed by a content hash of the model — never next
+    /// to `model_path`, so a read-only / air-gapped model location works), paying
+    /// the one-time ~100s ANE compile up front (e.g. at install time). The loaded
+    /// model is also retained in-memory, so within the **same process** subsequent
+    /// [`Self::diarize_file_with_models`] calls reuse it with no reload. Across
+    /// **separate processes** only the on-disk compiled cache carries over, so the
+    /// first diarize in a new process still pays the ~4s warm `MLModel` load (vs
+    /// ~100s cold). No audio is processed.
+    ///
+    /// # Arguments
+    /// * `model_path` - Path to the Sortformer `.mlpackage`
+    pub fn compile_diarization_model<Q: AsRef<Path>>(
+        &self,
+        model_path: Q,
+    ) -> Result<(), FluidAudioError> {
+        let model_str = model_path.as_ref().to_string_lossy();
+        if !model_path.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(model_str.to_string()));
+        }
+        self.bridge
+            .compile_diarization_model(&model_str)
+            .map_err(FluidAudioError::from)
+    }
+
     /// Diarize an audio file to identify speaker segments
     ///
     /// # Arguments

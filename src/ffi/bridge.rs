@@ -181,6 +181,25 @@ extern "C" {
 
     // String free
     fn fluidaudio_free_string(s: *mut i8);
+
+    // Model-path diarization (loads from a pre-staged .mlpackage, no download)
+    fn fluidaudio_diarize_file_with_models(
+        bridge: *mut std::ffi::c_void,
+        audio_path: *const i8,
+        model_path: *const i8,
+        out_speaker_ids: *mut *mut *mut i8,
+        out_start_times: *mut *mut f32,
+        out_end_times: *mut *mut f32,
+        out_quality_scores: *mut *mut f32,
+        out_count: *mut u32,
+    ) -> i32;
+
+    // Pre-compile the diarization .mlpackage to its stable .mlmodelc sibling
+    // and load it once (warm-up; populates the CoreML ANE/e5rt cache).
+    fn fluidaudio_compile_diarization_model(
+        bridge: *mut std::ffi::c_void,
+        model_path: *const i8,
+    ) -> i32;
 }
 
 use std::ffi::{CStr, CString};
@@ -211,6 +230,90 @@ impl FluidAudioBridge {
         } else {
             Err("Failed to initialize ASR".to_string())
         }
+    }
+
+    /// Pre-compile the diarization `.mlpackage` to its stable `.mlmodelc` sibling
+    /// and load it once (warm-up). Populates the CoreML ANE/e5rt cache so the first
+    /// real diarize is fast. No audio is processed.
+    pub fn compile_diarization_model(&self, model_path: &str) -> Result<(), String> {
+        let c_model = CString::new(model_path).map_err(|_| "Invalid model path")?;
+        let result = unsafe { fluidaudio_compile_diarization_model(self.ptr, c_model.as_ptr()) };
+        if result != 0 {
+            return Err("Diarization model warm-up (compile) failed".to_string());
+        }
+        Ok(())
+    }
+
+    /// Diarize from a pre-staged Sortformer `.mlpackage` — no network download.
+    /// Marshalling mirrors `diarize_file`.
+    pub fn diarize_file_with_models(
+        &self,
+        audio_path: &str,
+        model_path: &str,
+    ) -> Result<Vec<DiarizationSegment>, String> {
+        let c_audio = CString::new(audio_path).map_err(|_| "Invalid audio path")?;
+        let c_model = CString::new(model_path).map_err(|_| "Invalid model path")?;
+
+        let mut speaker_ids_ptr: *mut *mut i8 = std::ptr::null_mut();
+        let mut start_times_ptr: *mut f32 = std::ptr::null_mut();
+        let mut end_times_ptr: *mut f32 = std::ptr::null_mut();
+        let mut quality_scores_ptr: *mut f32 = std::ptr::null_mut();
+        let mut count: u32 = 0;
+
+        let result = unsafe {
+            fluidaudio_diarize_file_with_models(
+                self.ptr,
+                c_audio.as_ptr(),
+                c_model.as_ptr(),
+                &mut speaker_ids_ptr,
+                &mut start_times_ptr,
+                &mut end_times_ptr,
+                &mut quality_scores_ptr,
+                &mut count,
+            )
+        };
+
+        if result != 0 {
+            return Err("Diarization (model path) failed".to_string());
+        }
+
+        let mut segments = Vec::with_capacity(count as usize);
+
+        if count > 0
+            && !speaker_ids_ptr.is_null()
+            && !start_times_ptr.is_null()
+            && !end_times_ptr.is_null()
+            && !quality_scores_ptr.is_null()
+        {
+            for i in 0..count as usize {
+                let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
+                let speaker_id = if id_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { CStr::from_ptr(id_ptr) }
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                segments.push(DiarizationSegment {
+                    speaker_id,
+                    start_time: unsafe { *start_times_ptr.add(i) },
+                    end_time: unsafe { *end_times_ptr.add(i) },
+                    quality_score: unsafe { *quality_scores_ptr.add(i) },
+                });
+            }
+
+            unsafe {
+                fluidaudio_free_diarization_result(
+                    speaker_ids_ptr,
+                    start_times_ptr,
+                    end_times_ptr,
+                    quality_scores_ptr,
+                    count,
+                )
+            };
+        }
+
+        Ok(segments)
     }
 
     pub fn transcribe_file(&self, path: &str) -> Result<AsrResult, String> {
