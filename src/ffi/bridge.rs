@@ -194,8 +194,8 @@ extern "C" {
         out_count: *mut u32,
     ) -> i32;
 
-    // Pre-compile the diarization .mlpackage to its stable .mlmodelc sibling
-    // and load it once (warm-up; populates the CoreML ANE/e5rt cache).
+    // Pre-compile the diarization .mlpackage into a writable per-user cache and
+    // load it once (warm-up; populates the CoreML ANE/e5rt cache).
     fn fluidaudio_compile_diarization_model(
         bridge: *mut std::ffi::c_void,
         model_path: *const i8,
@@ -277,46 +277,15 @@ impl FluidAudioBridge {
             return Err("Diarization (model path) failed".to_string());
         }
 
-        let mut segments = Vec::with_capacity(count as usize);
-
-        if count > 0 {
-            if !speaker_ids_ptr.is_null()
-                && !start_times_ptr.is_null()
-                && !end_times_ptr.is_null()
-                && !quality_scores_ptr.is_null()
-            {
-                for i in 0..count as usize {
-                    let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
-                    let speaker_id = if id_ptr.is_null() {
-                        String::new()
-                    } else {
-                        unsafe { CStr::from_ptr(id_ptr) }
-                            .to_string_lossy()
-                            .into_owned()
-                    };
-                    segments.push(DiarizationSegment {
-                        speaker_id,
-                        start_time: unsafe { *start_times_ptr.add(i) },
-                        end_time: unsafe { *end_times_ptr.add(i) },
-                        quality_score: unsafe { *quality_scores_ptr.add(i) },
-                    });
-                }
-            }
-
-            // Free whenever count > 0 — the Swift side null-checks each pointer, so this
-            // also releases a partially-populated result instead of leaking it.
-            unsafe {
-                fluidaudio_free_diarization_result(
-                    speaker_ids_ptr,
-                    start_times_ptr,
-                    end_times_ptr,
-                    quality_scores_ptr,
-                    count,
-                )
-            };
-        }
-
-        Ok(segments)
+        Ok(unsafe {
+            collect_diarization_segments(
+                speaker_ids_ptr,
+                start_times_ptr,
+                end_times_ptr,
+                quality_scores_ptr,
+                count,
+            )
+        })
     }
 
     pub fn transcribe_file(&self, path: &str) -> Result<AsrResult, String> {
@@ -556,46 +525,15 @@ impl FluidAudioBridge {
             return Err("Diarization failed".to_string());
         }
 
-        let mut segments = Vec::with_capacity(count as usize);
-
-        if count > 0 {
-            if !speaker_ids_ptr.is_null()
-                && !start_times_ptr.is_null()
-                && !end_times_ptr.is_null()
-                && !quality_scores_ptr.is_null()
-            {
-                for i in 0..count as usize {
-                    let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
-                    let speaker_id = if id_ptr.is_null() {
-                        String::new()
-                    } else {
-                        unsafe { CStr::from_ptr(id_ptr) }
-                            .to_string_lossy()
-                            .into_owned()
-                    };
-                    segments.push(DiarizationSegment {
-                        speaker_id,
-                        start_time: unsafe { *start_times_ptr.add(i) },
-                        end_time: unsafe { *end_times_ptr.add(i) },
-                        quality_score: unsafe { *quality_scores_ptr.add(i) },
-                    });
-                }
-            }
-
-            // Free whenever count > 0 — the Swift side null-checks each pointer, so this
-            // also releases a partially-populated result instead of leaking it.
-            unsafe {
-                fluidaudio_free_diarization_result(
-                    speaker_ids_ptr,
-                    start_times_ptr,
-                    end_times_ptr,
-                    quality_scores_ptr,
-                    count,
-                )
-            };
-        }
-
-        Ok(segments)
+        Ok(unsafe {
+            collect_diarization_segments(
+                speaker_ids_ptr,
+                start_times_ptr,
+                end_times_ptr,
+                quality_scores_ptr,
+                count,
+            )
+        })
     }
 
     pub fn is_diarization_available(&self) -> bool {
@@ -961,6 +899,53 @@ impl FluidAudioBridge {
     pub fn cleanup(&self) {
         unsafe { fluidaudio_cleanup(self.ptr) };
     }
+}
+
+/// SAFETY: caller must guarantee the four pointers came from a successful
+/// `fluidaudio_diarize_*` call with the matching `count`. The result arrays are
+/// freed via `fluidaudio_free_diarization_result` before returning — including on
+/// the partial-null path, where the free function null-checks each pointer.
+unsafe fn collect_diarization_segments(
+    speaker_ids_ptr: *mut *mut i8,
+    start_times_ptr: *mut f32,
+    end_times_ptr: *mut f32,
+    quality_scores_ptr: *mut f32,
+    count: u32,
+) -> Vec<DiarizationSegment> {
+    let mut segments = Vec::with_capacity(count as usize);
+    if count == 0 {
+        return segments;
+    }
+
+    if !speaker_ids_ptr.is_null()
+        && !start_times_ptr.is_null()
+        && !end_times_ptr.is_null()
+        && !quality_scores_ptr.is_null()
+    {
+        for i in 0..count as usize {
+            let id_ptr = *speaker_ids_ptr.add(i);
+            let speaker_id = if id_ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(id_ptr).to_string_lossy().into_owned()
+            };
+            segments.push(DiarizationSegment {
+                speaker_id,
+                start_time: *start_times_ptr.add(i),
+                end_time: *end_times_ptr.add(i),
+                quality_score: *quality_scores_ptr.add(i),
+            });
+        }
+    }
+
+    fluidaudio_free_diarization_result(
+        speaker_ids_ptr,
+        start_times_ptr,
+        end_times_ptr,
+        quality_scores_ptr,
+        count,
+    );
+    segments
 }
 
 /// SAFETY: caller must guarantee the four pointers came from a successful

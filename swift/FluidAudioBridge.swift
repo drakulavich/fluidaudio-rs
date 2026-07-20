@@ -24,8 +24,8 @@ class FluidAudioBridgeInternal {
     private var diarizerManager: OfflineDiarizerManager?
     private var streamingAsrManager: SlidingWindowAsrManager?
     // Model-path diarization: retain the loaded MLModel (the ~4s-to-load part) keyed by
-    // the model's content fingerprint so repeated in-process diarize calls skip the reload.
-    // Guarded by a lock — the Rust bridge is Send+Sync and may be entered concurrently.
+    // model path so repeated in-process diarize calls skip the reload. Guarded by a lock
+    // — the Rust bridge is Send+Sync and may be entered concurrently from multiple threads.
     private let sortformerCacheLock = NSLock()
     private var sortformerModelCache: [String: MLModel] = [:]
     // Qwen3 types require macOS 15 / iOS 18, so store as Any? and cast at call sites
@@ -239,10 +239,11 @@ class FluidAudioBridgeInternal {
     /// call; the ~100s cost is the CoreML ANE program compile inside `MLModel(contentsOf:,
     /// .all)`, which Apple caches in `com.apple.e5rt.e5bundlecache` keyed to the compiled
     /// model's path — so a *stable* path makes the 2nd process onward ~4s (measured: cold
-    /// 104.7s, warm 3.9s on M3 Pro). `key` fingerprints the package (path + size + mtime),
-    /// so swapping a different model in at the same path invalidates the stale artifact.
-    private static func compiledModelURL(forModelPath modelPath: String, key: String) async throws -> URL {
+    /// 104.7s, warm 3.9s on M3 Pro). The compiled name fingerprints the package (path +
+    /// size + mtime), so swapping a different model in at the same path recompiles.
+    private static func compiledModelURL(forModelPath modelPath: String) async throws -> URL {
         let cacheDir = try compiledCacheDir()
+        let key = cacheKey(forModelPath: modelPath)
         let stableURL = cacheDir.appendingPathComponent(key + ".mlmodelc")
         let fm = FileManager.default
 
@@ -306,27 +307,26 @@ class FluidAudioBridgeInternal {
     /// `SortformerModels` per call — `SortformerModels` owns mutable scratch buffers that
     /// must not be shared across concurrent diarizations.
     private func cachedSortformerModel(modelPath: String) async throws -> MLModel {
-        // Key by the model's content fingerprint, not the raw path, so a model swapped
-        // in at the same path invalidates both this in-memory handle and the on-disk
-        // compiled cache consistently.
-        let key = Self.cacheKey(forModelPath: modelPath)
-
+        // Key by raw path: a hit returns with zero filesystem I/O. The content
+        // fingerprint (which requires walking the bundle) is computed only on the miss
+        // path, inside `compiledModelURL`, to name the on-disk compiled artifact — that
+        // disk cache is where content invalidation matters (across processes/versions).
         sortformerCacheLock.lock()
-        if let cached = sortformerModelCache[key] {
+        if let cached = sortformerModelCache[modelPath] {
             sortformerCacheLock.unlock()
             return cached
         }
         sortformerCacheLock.unlock()
 
-        let url = try await Self.compiledModelURL(forModelPath: modelPath, key: key)
+        let url = try await Self.compiledModelURL(forModelPath: modelPath)
         let cfg = MLModelConfiguration()
         cfg.computeUnits = .all
         let model = try MLModel(contentsOf: url, configuration: cfg)
 
         sortformerCacheLock.lock()
         defer { sortformerCacheLock.unlock() }
-        if let existing = sortformerModelCache[key] { return existing }
-        sortformerModelCache[key] = model
+        if let existing = sortformerModelCache[modelPath] { return existing }
+        sortformerModelCache[modelPath] = model
         return model
     }
 
@@ -1221,34 +1221,14 @@ public func fluidaudio_diarize_file(
 
     do {
         let segments = try bridge.diarizeFile(pathString)
-        let count = segments.count
-
-        outCount?.pointee = UInt32(count)
-
-        if count == 0 {
-            outSpeakerIds?.pointee = nil
-            outStartTimes?.pointee = nil
-            outEndTimes?.pointee = nil
-            outQualityScores?.pointee = nil
-        } else {
-            let ids = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: count)
-            let starts = UnsafeMutablePointer<Float>.allocate(capacity: count)
-            let ends = UnsafeMutablePointer<Float>.allocate(capacity: count)
-            let scores = UnsafeMutablePointer<Float>.allocate(capacity: count)
-
-            for (i, seg) in segments.enumerated() {
-                ids[i] = strdup(seg.speakerId)
-                starts[i] = seg.startTime
-                ends[i] = seg.endTime
-                scores[i] = seg.qualityScore
-            }
-
-            outSpeakerIds?.pointee = ids
-            outStartTimes?.pointee = starts
-            outEndTimes?.pointee = ends
-            outQualityScores?.pointee = scores
-        }
-
+        emitDiarizationSegments(
+            segments,
+            outSpeakerIds: outSpeakerIds,
+            outStartTimes: outStartTimes,
+            outEndTimes: outEndTimes,
+            outQualityScores: outQualityScores,
+            outCount: outCount
+        )
         return 0
     } catch {
         print("Diarize error: \(error)")
@@ -1698,6 +1678,46 @@ private func emitVadFrames(
     outProbabilities?.pointee = probs
     outIsVoiceActive?.pointee = voice
     outProcessingTimes?.pointee = times
+}
+
+/// Marshal diarization segments into the four caller-owned C out-arrays (freed by
+/// `fluidaudio_free_diarization_result`). Shared by the download and model-path FFI
+/// entry points (the latter lives in `Diarize_ffi.swift`). `count == 0` yields NULL arrays.
+func emitDiarizationSegments(
+    _ segments: [BridgeDiarizationSegment],
+    outSpeakerIds: UnsafeMutablePointer<UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?>?,
+    outStartTimes: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    outEndTimes: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    outQualityScores: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    outCount: UnsafeMutablePointer<UInt32>?
+) {
+    let count = segments.count
+    outCount?.pointee = UInt32(count)
+
+    if count == 0 {
+        outSpeakerIds?.pointee = nil
+        outStartTimes?.pointee = nil
+        outEndTimes?.pointee = nil
+        outQualityScores?.pointee = nil
+        return
+    }
+
+    let ids = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: count)
+    let starts = UnsafeMutablePointer<Float>.allocate(capacity: count)
+    let ends = UnsafeMutablePointer<Float>.allocate(capacity: count)
+    let scores = UnsafeMutablePointer<Float>.allocate(capacity: count)
+
+    for (i, seg) in segments.enumerated() {
+        ids[i] = strdup(seg.speakerId)
+        starts[i] = seg.startTime
+        ends[i] = seg.endTime
+        scores[i] = seg.qualityScore
+    }
+
+    outSpeakerIds?.pointee = ids
+    outStartTimes?.pointee = starts
+    outEndTimes?.pointee = ends
+    outQualityScores?.pointee = scores
 }
 
 // MARK: - ITN (Inverse Text Normalization) FFI

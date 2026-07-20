@@ -26,34 +26,14 @@ public func fluidaudio_diarize_file_with_models(
 
     do {
         let segments = try bridge.diarizeFileWithModels(audioPath: audioString, modelPath: modelString)
-        let count = segments.count
-
-        outCount?.pointee = UInt32(count)
-
-        if count == 0 {
-            outSpeakerIds?.pointee = nil
-            outStartTimes?.pointee = nil
-            outEndTimes?.pointee = nil
-            outQualityScores?.pointee = nil
-        } else {
-            let ids = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: count)
-            let starts = UnsafeMutablePointer<Float>.allocate(capacity: count)
-            let ends = UnsafeMutablePointer<Float>.allocate(capacity: count)
-            let scores = UnsafeMutablePointer<Float>.allocate(capacity: count)
-
-            for (i, seg) in segments.enumerated() {
-                ids[i] = strdup(seg.speakerId)
-                starts[i] = seg.startTime
-                ends[i] = seg.endTime
-                scores[i] = seg.qualityScore
-            }
-
-            outSpeakerIds?.pointee = ids
-            outStartTimes?.pointee = starts
-            outEndTimes?.pointee = ends
-            outQualityScores?.pointee = scores
-        }
-
+        emitDiarizationSegments(
+            segments,
+            outSpeakerIds: outSpeakerIds,
+            outStartTimes: outStartTimes,
+            outEndTimes: outEndTimes,
+            outQualityScores: outQualityScores,
+            outCount: outCount
+        )
         return 0
     } catch {
         print("Diarize (model path) error: \(error)")
@@ -63,9 +43,9 @@ public func fluidaudio_diarize_file_with_models(
 
 // MARK: - Warm-up: pre-compile the diarization model
 //
-// Compile the pre-staged Sortformer `.mlpackage` to its stable `.mlmodelc` sibling
-// and load it once, paying the one-time ~100s ANE compile up front (populates the
-// e5rt cache). Callers warm this at install time so the first real diarize is fast.
+// Compile the pre-staged Sortformer `.mlpackage` into the writable per-user cache and
+// load it once, paying the one-time ~100s ANE compile up front (populates the e5rt
+// cache). Callers warm this at install time so the first real diarize is fast.
 
 @_cdecl("fluidaudio_compile_diarization_model")
 public func fluidaudio_compile_diarization_model(
