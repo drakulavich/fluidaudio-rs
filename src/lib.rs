@@ -396,6 +396,11 @@ impl FluidAudio {
     /// the `SortformerNvidiaLow_v2.mlpackage`). Unlike [`Self::diarize_file`],
     /// this never touches HuggingFace and needs no prior `init_diarization`.
     ///
+    /// The compiled model is cached in a writable per-user directory (never next
+    /// to `model_path`, so a read-only / air-gapped model location works) and the
+    /// loaded handle is retained in-memory, so repeated calls in the same process
+    /// reuse it with no reload.
+    ///
     /// # Arguments
     /// * `audio` - Path to the audio file (WAV, M4A, MP3, etc.)
     /// * `model_path` - Path to the Sortformer `.mlpackage`
@@ -417,11 +422,16 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
-    /// Pre-compile the Sortformer `.mlpackage` to its stable `.mlmodelc` sibling
-    /// (`<model_path>.mlmodelc`) and load it once, populating CoreML's ANE (e5rt)
-    /// cache. Lets callers pay the one-time ~100s ANE compile up front (e.g. at
-    /// install time) so the first real [`Self::diarize_file_with_models`] is fast
-    /// (~4s) instead of recompiling on every call. No audio is processed.
+    /// Pre-compile the Sortformer `.mlpackage` and warm it, so the first real
+    /// diarization is fast. The compiled `.mlmodelc` is written to a writable
+    /// per-user cache directory (keyed by a content hash of the model — never next
+    /// to `model_path`, so a read-only / air-gapped model location works), paying
+    /// the one-time ~100s ANE compile up front (e.g. at install time). The loaded
+    /// model is also retained in-memory, so within the **same process** subsequent
+    /// [`Self::diarize_file_with_models`] calls reuse it with no reload. Across
+    /// **separate processes** only the on-disk compiled cache carries over, so the
+    /// first diarize in a new process still pays the ~4s warm `MLModel` load (vs
+    /// ~100s cold). No audio is processed.
     ///
     /// # Arguments
     /// * `model_path` - Path to the Sortformer `.mlpackage`
