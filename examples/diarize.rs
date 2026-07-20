@@ -1,6 +1,9 @@
 //! Example: Diarize an audio file (identify speakers)
 //!
-//! Usage: cargo run --example diarize -- path/to/audio.wav [threshold]
+//! Usage: cargo run --example diarize -- path/to/audio.wav [threshold] [model.mlpackage]
+//!
+//! With a 3rd arg (a pre-staged Sortformer `.mlpackage`), diarization runs offline via
+//! `diarize_file_with_models` with no download; `threshold` is ignored in that mode.
 
 use fluidaudio_rs::FluidAudio;
 use std::env;
