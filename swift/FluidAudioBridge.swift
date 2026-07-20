@@ -25,8 +25,8 @@ class FluidAudioBridgeInternal {
     private var streamingAsrManager: SlidingWindowAsrManager?
     private var kokoroManager: KokoroAneManager?
     // Model-path diarization: retain the loaded MLModel (the ~4s-to-load part) keyed by
-    // model path so repeated in-process diarize calls skip the reload. Guarded by a lock
-    // — the Rust bridge is Send+Sync and may be entered concurrently from multiple threads.
+    // the model's content fingerprint so repeated in-process diarize calls skip the reload.
+    // Guarded by a lock — the Rust bridge is Send+Sync and may be entered concurrently.
     private let sortformerCacheLock = NSLock()
     private var sortformerModelCache: [String: MLModel] = [:]
     // Qwen3 types require macOS 15 / iOS 18, so store as Any? and cast at call sites
@@ -317,26 +317,28 @@ class FluidAudioBridgeInternal {
     /// call; the ~100s cost is the CoreML ANE program compile inside `MLModel(contentsOf:,
     /// .all)`, which Apple caches in `com.apple.e5rt.e5bundlecache` keyed to the compiled
     /// model's path — so a *stable* path makes the 2nd process onward ~4s (measured: cold
-    /// 104.7s, warm 3.9s on M3 Pro). The path is keyed by a content hash of the package, so
-    /// swapping a different model in at the same path invalidates the stale artifact.
-    private static func compiledModelURL(forModelPath modelPath: String) async throws -> URL {
-        let mlpackageURL = URL(fileURLWithPath: modelPath)
-        let stableURL = try compiledCacheDir()
-            .appendingPathComponent(cacheKey(forModelPath: modelPath) + ".mlmodelc")
+    /// 104.7s, warm 3.9s on M3 Pro). `key` fingerprints the package (path + size + mtime),
+    /// so swapping a different model in at the same path invalidates the stale artifact.
+    private static func compiledModelURL(forModelPath modelPath: String, key: String) async throws -> URL {
+        let cacheDir = try compiledCacheDir()
+        let stableURL = cacheDir.appendingPathComponent(key + ".mlmodelc")
         let fm = FileManager.default
 
         if !fm.fileExists(atPath: stableURL.path) {
-            let compiled = try await MLModel.compileModel(at: mlpackageURL)
+            let compiled = try await MLModel.compileModel(at: URL(fileURLWithPath: modelPath))
+            defer { try? fm.removeItem(at: compiled) }
+            // Publish atomically: stage into a unique sibling of the final path (same
+            // volume, so the rename below is atomic), then rename into place — a reader
+            // never sees a half-written bundle. copyItem, not moveItem, from `compiled`:
+            // it lives in the system temp dir, often a different volume (EXDEV).
+            let staging = cacheDir.appendingPathComponent(key + ".\(UUID().uuidString).tmp")
             do {
-                try fm.moveItem(at: compiled, to: stableURL)
+                try fm.copyItem(at: compiled, to: staging)
+                try fm.moveItem(at: staging, to: stableURL)
             } catch {
-                // Another process may have published it first; or the temp dir and the
-                // cache live on different volumes (EXDEV), where moveItem can't rename.
-                if !fm.fileExists(atPath: stableURL.path) {
-                    do { try fm.copyItem(at: compiled, to: stableURL) }
-                    catch { if !fm.fileExists(atPath: stableURL.path) { throw error } }
-                }
-                try? fm.removeItem(at: compiled)
+                try? fm.removeItem(at: staging)
+                // Another process may have published it first; tolerate that.
+                if !fm.fileExists(atPath: stableURL.path) { throw error }
             }
         }
         return stableURL
@@ -382,22 +384,27 @@ class FluidAudioBridgeInternal {
     /// `SortformerModels` per call — `SortformerModels` owns mutable scratch buffers that
     /// must not be shared across concurrent diarizations.
     private func cachedSortformerModel(modelPath: String) async throws -> MLModel {
+        // Key by the model's content fingerprint, not the raw path, so a model swapped
+        // in at the same path invalidates both this in-memory handle and the on-disk
+        // compiled cache consistently.
+        let key = Self.cacheKey(forModelPath: modelPath)
+
         sortformerCacheLock.lock()
-        if let cached = sortformerModelCache[modelPath] {
+        if let cached = sortformerModelCache[key] {
             sortformerCacheLock.unlock()
             return cached
         }
         sortformerCacheLock.unlock()
 
-        let url = try await Self.compiledModelURL(forModelPath: modelPath)
+        let url = try await Self.compiledModelURL(forModelPath: modelPath, key: key)
         let cfg = MLModelConfiguration()
         cfg.computeUnits = .all
         let model = try MLModel(contentsOf: url, configuration: cfg)
 
         sortformerCacheLock.lock()
         defer { sortformerCacheLock.unlock() }
-        if let existing = sortformerModelCache[modelPath] { return existing }
-        sortformerModelCache[modelPath] = model
+        if let existing = sortformerModelCache[key] { return existing }
+        sortformerModelCache[key] = model
         return model
     }
 

@@ -345,29 +345,32 @@ impl FluidAudioBridge {
 
         let mut segments = Vec::with_capacity(count as usize);
 
-        if count > 0
-            && !speaker_ids_ptr.is_null()
-            && !start_times_ptr.is_null()
-            && !end_times_ptr.is_null()
-            && !quality_scores_ptr.is_null()
-        {
-            for i in 0..count as usize {
-                let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
-                let speaker_id = if id_ptr.is_null() {
-                    String::new()
-                } else {
-                    unsafe { CStr::from_ptr(id_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                segments.push(DiarizationSegment {
-                    speaker_id,
-                    start_time: unsafe { *start_times_ptr.add(i) },
-                    end_time: unsafe { *end_times_ptr.add(i) },
-                    quality_score: unsafe { *quality_scores_ptr.add(i) },
-                });
+        if count > 0 {
+            if !speaker_ids_ptr.is_null()
+                && !start_times_ptr.is_null()
+                && !end_times_ptr.is_null()
+                && !quality_scores_ptr.is_null()
+            {
+                for i in 0..count as usize {
+                    let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
+                    let speaker_id = if id_ptr.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { CStr::from_ptr(id_ptr) }
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    segments.push(DiarizationSegment {
+                        speaker_id,
+                        start_time: unsafe { *start_times_ptr.add(i) },
+                        end_time: unsafe { *end_times_ptr.add(i) },
+                        quality_score: unsafe { *quality_scores_ptr.add(i) },
+                    });
+                }
             }
 
+            // Free whenever count > 0 — the Swift side null-checks each pointer, so this
+            // also releases a partially-populated result instead of leaking it.
             unsafe {
                 fluidaudio_free_diarization_result(
                     speaker_ids_ptr,
@@ -621,29 +624,32 @@ impl FluidAudioBridge {
 
         let mut segments = Vec::with_capacity(count as usize);
 
-        if count > 0
-            && !speaker_ids_ptr.is_null()
-            && !start_times_ptr.is_null()
-            && !end_times_ptr.is_null()
-            && !quality_scores_ptr.is_null()
-        {
-            for i in 0..count as usize {
-                let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
-                let speaker_id = if id_ptr.is_null() {
-                    String::new()
-                } else {
-                    unsafe { CStr::from_ptr(id_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                segments.push(DiarizationSegment {
-                    speaker_id,
-                    start_time: unsafe { *start_times_ptr.add(i) },
-                    end_time: unsafe { *end_times_ptr.add(i) },
-                    quality_score: unsafe { *quality_scores_ptr.add(i) },
-                });
+        if count > 0 {
+            if !speaker_ids_ptr.is_null()
+                && !start_times_ptr.is_null()
+                && !end_times_ptr.is_null()
+                && !quality_scores_ptr.is_null()
+            {
+                for i in 0..count as usize {
+                    let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
+                    let speaker_id = if id_ptr.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { CStr::from_ptr(id_ptr) }
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    segments.push(DiarizationSegment {
+                        speaker_id,
+                        start_time: unsafe { *start_times_ptr.add(i) },
+                        end_time: unsafe { *end_times_ptr.add(i) },
+                        quality_score: unsafe { *quality_scores_ptr.add(i) },
+                    });
+                }
             }
 
+            // Free whenever count > 0 — the Swift side null-checks each pointer, so this
+            // also releases a partially-populated result instead of leaking it.
             unsafe {
                 fluidaudio_free_diarization_result(
                     speaker_ids_ptr,

@@ -424,7 +424,8 @@ impl FluidAudio {
 
     /// Pre-compile the Sortformer `.mlpackage` and warm it, so the first real
     /// diarization is fast. The compiled `.mlmodelc` is written to a writable
-    /// per-user cache directory (keyed by a content hash of the model — never next
+    /// per-user cache directory (keyed by a fingerprint of the model — its path,
+    /// total size, and newest mtime — never written next
     /// to `model_path`, so a read-only / air-gapped model location works), paying
     /// the one-time ~100s ANE compile up front (e.g. at install time). The loaded
     /// model is also retained in-memory, so within the **same process** subsequent
