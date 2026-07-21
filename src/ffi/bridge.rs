@@ -284,6 +284,10 @@ impl FluidAudioBridge {
             return Err("Kokoro synthesis failed".to_string());
         }
         if out_bytes.is_null() || out_len == 0 {
+            // On a success return Swift may still have handed us a (possibly
+            // zero-length) allocation; free it (null-safe) so the empty-audio
+            // path can't leak.
+            unsafe { fluidaudio_kokoro_free_bytes(out_bytes) };
             return Err("Kokoro returned no audio".to_string());
         }
 

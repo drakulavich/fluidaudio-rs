@@ -1004,6 +1004,7 @@ class FluidAudioBridgeInternal {
         sortformerModelCache.removeAll()
         sortformerCacheLock.unlock()
         streamingAsrManager = nil
+        kokoroManager = nil
         qwen3AsrManagerStorage = nil
         qwen3StreamingManagerStorage = nil
     }

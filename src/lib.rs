@@ -352,44 +352,6 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
-    /// Initialize the Kokoro TTS engine with a default voice and language.
-    ///
-    /// `lang` selects the KokoroAne variant in the Swift bridge (`zh` → Mandarin,
-    /// everything else → English). Downloads the variant's model on first run
-    /// (FluidAudio-managed cache).
-    pub fn init_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), FluidAudioError> {
-        self.bridge
-            .initialize_kokoro(default_voice, lang)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Synthesize text via Kokoro TTS in the language the engine was initialized
-    /// with (`init_kokoro`'s `lang`): English by default, or Mandarin when
-    /// `lang` was `zh` (the `.mandarin` KokoroAne variant).
-    ///
-    /// # Arguments
-    /// * `text` - Text to synthesize
-    /// * `voice` - Kokoro voice id (e.g. `am_michael`)
-    /// * `speed` - Speech rate (0.5-2.0; clamped by FluidAudio)
-    ///
-    /// # Returns
-    /// * `Vec<u8>` - a complete WAV (24 kHz mono, 16-bit PCM)
-    pub fn synthesize_kokoro(
-        &self,
-        text: &str,
-        voice: &str,
-        speed: f32,
-    ) -> Result<Vec<u8>, FluidAudioError> {
-        self.bridge
-            .kokoro_synthesize(text, voice, speed)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Check if Kokoro TTS is initialized and ready.
-    pub fn is_kokoro_available(&self) -> bool {
-        self.bridge.is_kokoro_available()
-    }
-
     /// Diarize an audio file using a pre-staged Sortformer model (`.mlpackage`
     /// path), with **no** network download. The caller is responsible for
     /// provisioning and verifying the model. Config is `.balancedV2` (matches
@@ -474,6 +436,46 @@ impl FluidAudio {
     /// Check if diarization is initialized and ready
     pub fn is_diarization_available(&self) -> bool {
         self.bridge.is_diarization_available()
+    }
+
+    // ========== TTS (Kokoro) Methods ==========
+
+    /// Initialize the Kokoro TTS engine with a default voice and language.
+    ///
+    /// `lang` selects the KokoroAne variant in the Swift bridge (`zh` → Mandarin,
+    /// everything else → English). Downloads the variant's model on first run
+    /// (FluidAudio-managed cache).
+    pub fn init_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), FluidAudioError> {
+        self.bridge
+            .initialize_kokoro(default_voice, lang)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Synthesize text via Kokoro TTS in the language the engine was initialized
+    /// with (`init_kokoro`'s `lang`): English by default, or Mandarin when
+    /// `lang` was `zh` (the `.mandarin` KokoroAne variant).
+    ///
+    /// # Arguments
+    /// * `text` - Text to synthesize
+    /// * `voice` - Kokoro voice id (e.g. `am_michael`)
+    /// * `speed` - Speech rate (0.5-2.0; clamped by FluidAudio)
+    ///
+    /// # Returns
+    /// * `Vec<u8>` - a complete WAV (24 kHz mono, 16-bit PCM)
+    pub fn synthesize_kokoro(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<Vec<u8>, FluidAudioError> {
+        self.bridge
+            .kokoro_synthesize(text, voice, speed)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Check if Kokoro TTS is initialized and ready.
+    pub fn is_kokoro_available(&self) -> bool {
+        self.bridge.is_kokoro_available()
     }
 
     // ========== Qwen3 ASR Methods ==========

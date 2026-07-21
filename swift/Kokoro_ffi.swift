@@ -37,7 +37,13 @@ public func fluidaudio_kokoro_synthesize(
     _ outBytes: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>?,
     _ outLen: UnsafeMutablePointer<UInt>?
 ) -> Int32 {
-    guard let ptr = ptr, let text = text else { return -1 }
+    // Both output pointers are required: without them the caller can neither
+    // receive the buffer nor its length, and allocating anyway would leak.
+    guard let ptr = ptr, let text = text, let outBytes = outBytes, let outLen = outLen else {
+        return -1
+    }
+    outBytes.pointee = nil
+    outLen.pointee = 0
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
     let textString = String(cString: text)
     let voiceString = voice.map { String(cString: $0) } ?? "af_heart"
@@ -46,8 +52,8 @@ public func fluidaudio_kokoro_synthesize(
         let count = data.count
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
         data.copyBytes(to: buf, count: count)
-        outBytes?.pointee = buf
-        outLen?.pointee = UInt(count)
+        outBytes.pointee = buf
+        outLen.pointee = UInt(count)
         return 0
     } catch {
         print("Kokoro synthesize error: \(error)")
