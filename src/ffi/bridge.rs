@@ -182,6 +182,23 @@ extern "C" {
     // String free
     fn fluidaudio_free_string(s: *mut i8);
 
+    // Kokoro TTS
+    fn fluidaudio_initialize_kokoro(
+        bridge: *mut std::ffi::c_void,
+        default_voice: *const i8,
+        lang: *const i8,
+    ) -> i32;
+    fn fluidaudio_kokoro_synthesize(
+        bridge: *mut std::ffi::c_void,
+        text: *const i8,
+        voice: *const i8,
+        speed: f32,
+        out_bytes: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> i32;
+    fn fluidaudio_kokoro_free_bytes(p: *mut u8);
+    fn fluidaudio_is_kokoro_available(bridge: *mut std::ffi::c_void) -> i32;
+
     // Model-path diarization (loads from a pre-staged .mlpackage, no download)
     fn fluidaudio_diarize_file_with_models(
         bridge: *mut std::ffi::c_void,
@@ -230,6 +247,55 @@ impl FluidAudioBridge {
         } else {
             Err("Failed to initialize ASR".to_string())
         }
+    }
+
+    pub fn initialize_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), String> {
+        let c_voice = CString::new(default_voice).map_err(|_| "Invalid voice")?;
+        let c_lang = CString::new(lang).map_err(|_| "Invalid lang")?;
+        let result =
+            unsafe { fluidaudio_initialize_kokoro(self.ptr, c_voice.as_ptr(), c_lang.as_ptr()) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err("Failed to initialize Kokoro".to_string())
+        }
+    }
+
+    /// Synthesize `text` with `voice` at `speed`; returns the complete WAV bytes
+    /// produced by FluidAudio's KokoroAneManager (24 kHz mono 16-bit PCM (i16), peak-normalized).
+    pub fn kokoro_synthesize(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<u8>, String> {
+        let c_text = CString::new(text).map_err(|_| "Invalid text")?;
+        let c_voice = CString::new(voice).map_err(|_| "Invalid voice")?;
+        let mut out_bytes: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        let result = unsafe {
+            fluidaudio_kokoro_synthesize(
+                self.ptr,
+                c_text.as_ptr(),
+                c_voice.as_ptr(),
+                speed,
+                &mut out_bytes,
+                &mut out_len,
+            )
+        };
+
+        if result != 0 {
+            return Err("Kokoro synthesis failed".to_string());
+        }
+        if out_bytes.is_null() || out_len == 0 {
+            return Err("Kokoro returned no audio".to_string());
+        }
+
+        // SAFETY: the Swift side allocated `out_len` bytes at `out_bytes`; copy
+        // them out, then hand the buffer back to Swift to free.
+        let wav = unsafe { std::slice::from_raw_parts(out_bytes, out_len) }.to_vec();
+        unsafe { fluidaudio_kokoro_free_bytes(out_bytes) };
+        Ok(wav)
+    }
+
+    pub fn is_kokoro_available(&self) -> bool {
+        unsafe { fluidaudio_is_kokoro_available(self.ptr) != 0 }
     }
 
     /// Pre-compile the diarization `.mlpackage` to its stable `.mlmodelc` sibling
