@@ -6,6 +6,13 @@ import Foundation
 // @_cdecl pattern in FluidAudioBridge.swift: recover the bridge from the opaque
 // pointer, call the (synchronous) internal method, marshal the result out.
 
+/// Emit a diagnostic to stderr. `synthesize` returns raw WAV bytes that callers
+/// typically stream to stdout (see examples/kokoro.rs), so diagnostics must not
+/// go to stdout or they corrupt the audio stream.
+private func kokoroLog(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
 @_cdecl("fluidaudio_initialize_kokoro")
 public func fluidaudio_initialize_kokoro(
     _ ptr: UnsafeMutableRawPointer?,
@@ -20,7 +27,7 @@ public func fluidaudio_initialize_kokoro(
         try bridge.initializeKokoro(defaultVoice: voice, lang: langString)
         return 0
     } catch {
-        print("Kokoro init error: \(error)")
+        kokoroLog("Kokoro init error: \(error)")
         return -1
     }
 }
@@ -56,7 +63,7 @@ public func fluidaudio_kokoro_synthesize(
         outLen.pointee = UInt(count)
         return 0
     } catch {
-        print("Kokoro synthesize error: \(error)")
+        kokoroLog("Kokoro synthesize error: \(error)")
         return -1
     }
 }

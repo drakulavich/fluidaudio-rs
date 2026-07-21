@@ -1,14 +1,15 @@
 //! Example: synthesize TTS via FluidAudio Kokoro.
-//! Usage: cargo run --example kokoro --features tts -- "Hello world" am_michael en-us > out.wav
-//!        cargo run --example kokoro --features tts -- "你好" zm_yunjian zh > out.wav
+//! Usage: cargo run --example kokoro --features tts -- "Hello world" af_heart en-us > out.wav
+//!        cargo run --example kokoro --features tts -- "你好" zf_001 zh > out.wav
 //! `lang` selects the KokoroAne variant (`zh` → Mandarin, else English).
+//! `af_heart` (English) and `zf_001` (Mandarin) are the built-in default voices.
 use fluidaudio_rs::FluidAudio;
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let text = args.get(1).map(String::as_str).unwrap_or("Hello world");
-    let voice = args.get(2).map(String::as_str).unwrap_or("am_michael");
+    let voice = args.get(2).map(String::as_str).unwrap_or("af_heart");
     let lang = args.get(3).map(String::as_str).unwrap_or("en-us");
 
     let audio = FluidAudio::new()?;
