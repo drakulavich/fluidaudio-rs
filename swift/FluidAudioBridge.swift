@@ -23,6 +23,7 @@ class FluidAudioBridgeInternal {
     private var vadManager: VadManager?
     private var diarizerManager: OfflineDiarizerManager?
     private var streamingAsrManager: SlidingWindowAsrManager?
+    private var kokoroManager: KokoroAneManager?
     // Model-path diarization: retain the loaded MLModel (the ~4s-to-load part) keyed by
     // model path so repeated in-process diarize calls skip the reload. Guarded by a lock
     // — the Rust bridge is Send+Sync and may be entered concurrently from multiple threads.
@@ -140,6 +141,83 @@ class FluidAudioBridgeInternal {
 
     func isAsrAvailable() -> Bool {
         return asrManager != nil
+    }
+
+    /// Map a kesha/espeak-style language tag to a KokoroAne variant. FluidAudio
+    /// 0.14.8 ships exactly two KokoroAne variants — `.english` and `.mandarin`
+    /// — so `zh` selects Mandarin (its own tone-aware G2P) and everything else
+    /// (en plus the Latin-script es/fr/it/pt, which synthesize acceptably through
+    /// the English G2P) falls back to `.english`.
+    private static func kokoroVariant(for lang: String) -> KokoroAneVariant {
+        let base = lang.lowercased().split(separator: "-").first.map(String.init) ?? ""
+        switch base {
+        case "zh": return .mandarin
+        default: return .english
+        }
+    }
+
+    func initializeKokoro(defaultVoice: String, lang: String) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        var initError: Error?
+
+        Task {
+            do {
+                // `KokoroAneManager` feeds `speed` as a real model input tensor,
+                // so `--rate` applies correctly (unlike the prior `voiceSpeed:` path).
+                let variant = Self.kokoroVariant(for: lang)
+                let manager = KokoroAneManager(variant: variant, defaultVoice: defaultVoice)
+                try await manager.initialize(preloadVoices: [defaultVoice])
+                self.kokoroManager = manager
+            } catch {
+                initError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = initError {
+            throw error
+        }
+    }
+
+    /// Synthesize `text` and return a complete WAV byte buffer (24 kHz mono),
+    /// exactly what `KokoroAneManager.synthesize` produces. `speed` (1.0 =
+    /// normal) is fed to the model as a real input tensor, so it genuinely
+    /// applies — unlike the removed `KokoroTtsManager.synthesize(voiceSpeed:)`.
+    func synthesizeKokoro(text: String, voice: String, speed: Float) throws -> Data {
+        guard let manager = kokoroManager else {
+            throw BridgeError.notInitialized
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Data?
+        var synthError: Error?
+
+        Task {
+            do {
+                result = try await manager.synthesize(text: text, voice: voice, speed: speed)
+            } catch {
+                synthError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = synthError {
+            throw error
+        }
+
+        guard let data = result else {
+            throw BridgeError.noResult
+        }
+
+        return data
+    }
+
+    func isKokoroAvailable() -> Bool {
+        return kokoroManager != nil
     }
 
     func initializeVad(_ threshold: Float) throws {
@@ -926,6 +1004,7 @@ class FluidAudioBridgeInternal {
         sortformerModelCache.removeAll()
         sortformerCacheLock.unlock()
         streamingAsrManager = nil
+        kokoroManager = nil
         qwen3AsrManagerStorage = nil
         qwen3StreamingManagerStorage = nil
     }
