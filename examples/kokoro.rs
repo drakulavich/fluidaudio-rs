@@ -3,6 +3,7 @@
 //!        cargo run --example kokoro --features tts -- "你好" zf_001 zh > out.wav
 //! `lang` selects the KokoroAne variant (`zh` → Mandarin, else English).
 //! `af_heart` (English) and `zf_001` (Mandarin) are the built-in default voices.
+//! Note: only these ship in FluidAudio's model bundle — any other voice id must be pre-staged as `<voice>.bin` in the model cache by the caller, or it 404s on load.
 use fluidaudio_rs::FluidAudio;
 use std::io::Write;
 
