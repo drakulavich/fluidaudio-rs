@@ -328,3 +328,68 @@ fn asr_transcribe_file_is_stateless_across_calls() {
         first.text, second.text,
     );
 }
+
+/// A bridge can be rooted at a caller-owned directory. Creation alone downloads
+/// nothing, so this stays in the fast set.
+#[test]
+fn bridge_with_models_dir_is_created() {
+    let dir = std::env::temp_dir().join("fluidaudio-rs-models-root-test");
+    let audio = FluidAudio::with_models_dir(&dir).expect("bridge with a models dir");
+    drop(audio);
+}
+
+/// An empty directory string is accepted and means "keep the defaults", matching
+/// the null case on the Swift side.
+#[test]
+fn bridge_with_empty_models_dir_falls_back_to_defaults() {
+    let audio = FluidAudio::with_models_dir("").expect("empty dir means defaults");
+    drop(audio);
+}
+
+/// The root is honored, not merely accepted: ASR init must materialise its repo
+/// folder under the supplied directory rather than the platform default.
+/// Downloads ~1 GB on a cold cache.
+#[test]
+#[ignore]
+fn models_dir_receives_the_asr_repo() {
+    let root = std::env::temp_dir().join("fluidaudio-rs-models-root-e2e");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create root");
+
+    let audio = FluidAudio::with_models_dir(&root).expect("bridge");
+    audio.init_asr().expect("asr init under the supplied root");
+
+    let repo = root.join("parakeet-tdt-0.6b-v3");
+    assert!(
+        repo.is_dir(),
+        "expected the ASR repo under {}, found: {:?}",
+        root.display(),
+        std::fs::read_dir(&root).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+}
+
+/// The same root serves Kokoro, whose `directory` is a *base* the library appends
+/// its repo folder to — unlike ASR, which takes the repo directory itself.
+/// Downloads ~200 MB on a cold cache.
+#[test]
+#[ignore]
+fn models_dir_receives_the_kokoro_repo() {
+    let root = std::env::temp_dir().join("fluidaudio-rs-models-root-kokoro");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create root");
+
+    // `af_heart` is the only voice pack the upstream ANE bundle ships; asking for another
+    // 404s regardless of where the root points, which would test the bundle, not the plumbing.
+    let audio = FluidAudio::with_models_dir(&root).expect("bridge");
+    audio
+        .init_kokoro("af_heart", "en-us")
+        .expect("kokoro init under the supplied root");
+
+    let repo = root.join("kokoro-82m-coreml").join("ANE");
+    assert!(
+        repo.is_dir(),
+        "expected the Kokoro repo under {}, found: {:?}",
+        root.display(),
+        std::fs::read_dir(&root).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+}
