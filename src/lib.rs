@@ -65,6 +65,36 @@ impl From<String> for FluidAudioError {
     }
 }
 
+/// CoreML compute-unit selection for the Kokoro pipeline, mirroring the presets FluidAudio
+/// publishes.
+///
+/// The default pins several stages — including the vocoder — to the Neural Engine. That is the
+/// fast path on real hardware and an outright failure where no ANE is exposed, such as a
+/// virtualised macOS host, where CoreML cannot prepare an ANE-targeted program at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KokoroComputeUnits {
+    /// FluidAudio's per-stage defaults.
+    #[default]
+    Default,
+    /// Skip the Neural Engine entirely.
+    CpuAndGpu,
+    /// Put every stage on the Neural Engine.
+    AllAne,
+    /// CPU only.
+    CpuOnly,
+}
+
+impl KokoroComputeUnits {
+    fn as_selector(self) -> i32 {
+        match self {
+            Self::Default => 0,
+            Self::CpuAndGpu => 1,
+            Self::AllAne => 2,
+            Self::CpuOnly => 3,
+        }
+    }
+}
+
 /// Main FluidAudio interface for Rust
 ///
 /// Provides access to ASR and VAD functionality.
@@ -379,6 +409,22 @@ impl FluidAudio {
     pub fn init_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), FluidAudioError> {
         self.bridge
             .initialize_kokoro(default_voice, lang)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Initialize Kokoro with an explicit compute-unit selection.
+    ///
+    /// Use [`KokoroComputeUnits::CpuAndGpu`] on hosts without a Neural Engine: the default pins
+    /// the vocoder stage to it, and CoreML cannot prepare an ANE-targeted program where none is
+    /// exposed. Otherwise identical to [`FluidAudio::init_kokoro`].
+    pub fn init_kokoro_with_compute_units(
+        &self,
+        default_voice: &str,
+        lang: &str,
+        compute_units: KokoroComputeUnits,
+    ) -> Result<(), FluidAudioError> {
+        self.bridge
+            .initialize_kokoro_with_compute_units(default_voice, lang, compute_units.as_selector())
             .map_err(FluidAudioError::from)
     }
 

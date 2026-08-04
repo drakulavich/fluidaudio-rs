@@ -25,6 +25,32 @@ public func fluidaudio_initialize_kokoro(
     }
 }
 
+/// Same as `fluidaudio_initialize_kokoro`, but overrides the CoreML compute units for every
+/// pipeline stage: 1 = cpuAndGpu (skips the Neural Engine entirely), 2 = allAne, 3 = cpuOnly,
+/// anything else = FluidAudio's per-stage defaults. The escape hatch matters on hosts with no
+/// ANE — a virtualised macOS runner cannot prepare the ANE-pinned vocoder stage at all.
+@_cdecl("fluidaudio_initialize_kokoro_with_compute_units")
+public func fluidaudio_initialize_kokoro_with_compute_units(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ defaultVoice: UnsafePointer<CChar>?,
+    _ lang: UnsafePointer<CChar>?,
+    _ computeUnits: Int32
+) -> Int32 {
+    guard let ptr = ptr else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    let voice = defaultVoice.map { String(cString: $0) } ?? "af_heart"
+    let langString = lang.map { String(cString: $0) } ?? ""
+    do {
+        try bridge.initializeKokoro(
+            defaultVoice: voice, lang: langString,
+            computeUnits: FluidAudioBridgeInternal.kokoroComputeUnits(for: computeUnits))
+        return 0
+    } catch {
+        print("Kokoro init error: \(error)")
+        return -1
+    }
+}
+
 /// Synthesize `text` with `voice` at `speed`; returns a complete WAV byte buffer
 /// (24 kHz mono 16-bit PCM (i16), peak-normalized) via `outBytes`/`outLen`. The caller owns the buffer and must
 /// free it with `fluidaudio_kokoro_free_bytes`.

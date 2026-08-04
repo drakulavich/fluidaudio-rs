@@ -184,6 +184,12 @@ extern "C" {
     fn fluidaudio_free_string(s: *mut i8);
 
     // Kokoro TTS
+    fn fluidaudio_initialize_kokoro_with_compute_units(
+        bridge: *mut std::ffi::c_void,
+        default_voice: *const i8,
+        lang: *const i8,
+        compute_units: i32,
+    ) -> i32;
     fn fluidaudio_initialize_kokoro(
         bridge: *mut std::ffi::c_void,
         default_voice: *const i8,
@@ -258,6 +264,29 @@ impl FluidAudioBridge {
             Ok(())
         } else {
             Err("Failed to initialize ASR".to_string())
+        }
+    }
+
+    pub fn initialize_kokoro_with_compute_units(
+        &self,
+        default_voice: &str,
+        lang: &str,
+        compute_units: i32,
+    ) -> Result<(), String> {
+        let c_voice = std::ffi::CString::new(default_voice).map_err(|e| e.to_string())?;
+        let c_lang = std::ffi::CString::new(lang).map_err(|e| e.to_string())?;
+        let result = unsafe {
+            fluidaudio_initialize_kokoro_with_compute_units(
+                self.ptr,
+                c_voice.as_ptr(),
+                c_lang.as_ptr(),
+                compute_units,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err("Failed to initialize Kokoro".to_string())
         }
     }
 

@@ -173,7 +173,21 @@ class FluidAudioBridgeInternal {
         }
     }
 
-    func initializeKokoro(defaultVoice: String, lang: String) throws {
+    /// Maps the C-ABI selector to the presets FluidAudio itself publishes. Unknown values fall
+    /// back to `.default` rather than failing: a newer caller against an older bridge should
+    /// lose the override, not the ability to synthesise.
+    static func kokoroComputeUnits(for selector: Int32) -> KokoroAneComputeUnits {
+        switch selector {
+        case 1: return .cpuAndGpu
+        case 2: return .allAne
+        case 3: return .cpuOnly
+        default: return .default
+        }
+    }
+
+    func initializeKokoro(
+        defaultVoice: String, lang: String, computeUnits: KokoroAneComputeUnits = .default
+    ) throws {
         let semaphore = DispatchSemaphore(value: 0)
         var initError: Error?
 
@@ -183,7 +197,8 @@ class FluidAudioBridgeInternal {
                 // so `--rate` applies correctly (unlike the prior `voiceSpeed:` path).
                 let variant = Self.kokoroVariant(for: lang)
                 let manager = KokoroAneManager(
-                    variant: variant, defaultVoice: defaultVoice, directory: self.modelsRoot)
+                    variant: variant, defaultVoice: defaultVoice, directory: self.modelsRoot,
+                    computeUnits: computeUnits)
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {
