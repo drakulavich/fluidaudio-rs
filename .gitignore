@@ -1,2 +1,8 @@
 /target
 /.build
+
+# Agent tooling scratch (oh-my-claudecode state + ask artifacts)
+.omc/
+
+# macOS
+.DS_Store
