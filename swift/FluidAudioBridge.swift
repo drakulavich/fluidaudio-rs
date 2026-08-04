@@ -34,10 +34,10 @@ class FluidAudioBridgeInternal {
     private var qwen3AsrManagerStorage: Any?
     private var qwen3StreamingManagerStorage: Any?
 
-    /// Base directory for every model this bridge downloads. `nil` keeps FluidAudio's
-    /// per-subsystem defaults, which live under two different roots (Application Support for
-    /// ASR/VAD/diarization, `~/.cache/fluidaudio` for TTS). Embedders that want one owned
-    /// location pass it once here.
+    /// Base directory for the models this bridge roots: Parakeet ASR, the KokoroAne chain and
+    /// the compiled-Sortformer cache. `nil` keeps FluidAudio's defaults. VAD, diarization,
+    /// Qwen3 and the pinned English G2P assets still go to the platform locations — see
+    /// `FluidAudio::with_models_dir` for why.
     private let modelsRoot: URL?
 
     /// `AsrModels.download(to:)` takes the *repo* directory, while `KokoroAneManager(directory:)`
@@ -173,9 +173,10 @@ class FluidAudioBridgeInternal {
         }
     }
 
-    /// Maps the C-ABI selector to the presets FluidAudio itself publishes. Unknown values fall
-    /// back to `.default` rather than failing: a newer caller against an older bridge should
-    /// lose the override, not the ability to synthesise.
+    /// Maps the C-ABI selector to the presets FluidAudio itself publishes. An unrecognised
+    /// *value* falls back to `.default` so a caller that learns a new preset first degrades to
+    /// the old behaviour. This says nothing about missing *symbols*: the Swift package is
+    /// statically linked by build.rs, so an absent entry point is a link error, not a fallback.
     static func kokoroComputeUnits(for selector: Int32) -> KokoroAneComputeUnits {
         switch selector {
         case 1: return .cpuAndGpu
@@ -1062,9 +1063,9 @@ public func fluidaudio_bridge_create() -> UnsafeMutableRawPointer? {
     return Unmanaged.passRetained(bridge).toOpaque()
 }
 
-/// Same as `fluidaudio_bridge_create`, but every model this bridge downloads is rooted at
-/// `dir` instead of FluidAudio's two platform defaults. A null or empty `dir` behaves exactly
-/// like `fluidaudio_bridge_create`.
+/// Same as `fluidaudio_bridge_create`, but roots Parakeet ASR, the KokoroAne chain and the
+/// compiled-Sortformer cache at `dir`. Other subsystems keep the platform defaults. A null or
+/// empty `dir` behaves exactly like `fluidaudio_bridge_create`.
 @_cdecl("fluidaudio_bridge_create_with_models_dir")
 public func fluidaudio_bridge_create_with_models_dir(
     _ dir: UnsafePointer<CChar>?
