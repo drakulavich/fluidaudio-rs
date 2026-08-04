@@ -394,10 +394,11 @@ fn models_dir_receives_the_kokoro_repo() {
     );
 }
 
-/// The compute-unit override reaches Swift and is accepted. Kokoro is not
-/// initialized here, so this stays in the fast set.
+/// `Default` is the zero-value preset, so an embedder that omits the argument gets
+/// FluidAudio's per-stage behaviour. Pure Rust — the FFI is covered by the ignored
+/// synthesis test below, not by this.
 #[test]
-fn kokoro_compute_units_default_matches_plain_init() {
+fn kokoro_compute_units_default_is_the_library_default() {
     assert_eq!(KokoroComputeUnits::default(), KokoroComputeUnits::Default);
 }
 
