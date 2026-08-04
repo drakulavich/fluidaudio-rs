@@ -7,6 +7,7 @@
 extern "C" {
     // Constructor / Destructor
     fn fluidaudio_bridge_create() -> *mut std::ffi::c_void;
+    fn fluidaudio_bridge_create_with_models_dir(dir: *const i8) -> *mut std::ffi::c_void;
     fn fluidaudio_bridge_destroy(bridge: *mut std::ffi::c_void);
 
     // ASR
@@ -233,6 +234,17 @@ unsafe impl Sync for FluidAudioBridge {}
 impl FluidAudioBridge {
     pub fn new() -> Option<Self> {
         let ptr = unsafe { fluidaudio_bridge_create() };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr })
+        }
+    }
+
+    /// Roots every model download at `dir` instead of FluidAudio's platform defaults.
+    pub fn new_with_models_dir(dir: &str) -> Option<Self> {
+        let c_dir = std::ffi::CString::new(dir).ok()?;
+        let ptr = unsafe { fluidaudio_bridge_create_with_models_dir(c_dir.as_ptr()) };
         if ptr.is_null() {
             None
         } else {

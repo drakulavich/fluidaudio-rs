@@ -34,7 +34,24 @@ class FluidAudioBridgeInternal {
     private var qwen3AsrManagerStorage: Any?
     private var qwen3StreamingManagerStorage: Any?
 
-    init() {}
+    /// Base directory for every model this bridge downloads. `nil` keeps FluidAudio's
+    /// per-subsystem defaults, which live under two different roots (Application Support for
+    /// ASR/VAD/diarization, `~/.cache/fluidaudio` for TTS). Embedders that want one owned
+    /// location pass it once here.
+    private let modelsRoot: URL?
+
+    /// `AsrModels.download(to:)` takes the *repo* directory, while `KokoroAneManager(directory:)`
+    /// takes the base and appends the repo folder itself. Handing ASR a base makes
+    /// `DownloadUtils` write into its parent, one level above where the caller asked. Derive the
+    /// folder name from the library's own default so an upstream rename cannot desync it.
+    private var asrModelsDirectory: URL? {
+        modelsRoot?.appendingPathComponent(
+            AsrModels.defaultCacheDirectory().lastPathComponent, isDirectory: true)
+    }
+
+    init(modelsRoot: URL? = nil) {
+        self.modelsRoot = modelsRoot
+    }
 
     func initializeAsr() throws {
         let semaphore = DispatchSemaphore(value: 0)
@@ -42,7 +59,7 @@ class FluidAudioBridgeInternal {
 
         Task {
             do {
-                let models = try await AsrModels.downloadAndLoad()
+                let models = try await AsrModels.downloadAndLoad(to: self.asrModelsDirectory)
                 self.asrModels = models
 
                 let manager = AsrManager()
@@ -165,7 +182,8 @@ class FluidAudioBridgeInternal {
                 // `KokoroAneManager` feeds `speed` as a real model input tensor,
                 // so `--rate` applies correctly (unlike the prior `voiceSpeed:` path).
                 let variant = Self.kokoroVariant(for: lang)
-                let manager = KokoroAneManager(variant: variant, defaultVoice: defaultVoice)
+                let manager = KokoroAneManager(
+                    variant: variant, defaultVoice: defaultVoice, directory: self.modelsRoot)
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {
@@ -319,8 +337,10 @@ class FluidAudioBridgeInternal {
     /// model's path — so a *stable* path makes the 2nd process onward ~4s (measured: cold
     /// 104.7s, warm 3.9s on M3 Pro). The compiled name fingerprints the package (path +
     /// size + mtime), so swapping a different model in at the same path recompiles.
-    private static func compiledModelURL(forModelPath modelPath: String) async throws -> URL {
-        let cacheDir = try compiledCacheDir()
+    private static func compiledModelURL(forModelPath modelPath: String, root: URL?) async throws
+        -> URL
+    {
+        let cacheDir = try compiledCacheDir(root: root)
         let key = cacheKey(forModelPath: modelPath)
         let stableURL = cacheDir.appendingPathComponent(key + ".mlmodelc")
         let fm = FileManager.default
@@ -347,10 +367,11 @@ class FluidAudioBridgeInternal {
 
     /// Writable cache dir for compiled Sortformer models: Application Support (not
     /// `.cachesDirectory`, which the OS may reclaim — recompiling costs ~100s).
-    private static func compiledCacheDir() throws -> URL {
-        let base = try FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: true)
+    private static func compiledCacheDir(root: URL? = nil) throws -> URL {
+        let base = try root
+            ?? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true)
         let dir = base.appendingPathComponent("fluidaudio-rs/SortformerCompiled", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -396,7 +417,7 @@ class FluidAudioBridgeInternal {
         }
         sortformerCacheLock.unlock()
 
-        let url = try await Self.compiledModelURL(forModelPath: modelPath)
+        let url = try await Self.compiledModelURL(forModelPath: modelPath, root: modelsRoot)
         let cfg = MLModelConfiguration()
         cfg.computeUnits = .all
         let model = try MLModel(contentsOf: url, configuration: cfg)
@@ -503,7 +524,7 @@ class FluidAudioBridgeInternal {
 
         Task {
             do {
-                let models = try await AsrModels.downloadAndLoad()
+                let models = try await AsrModels.downloadAndLoad(to: self.asrModelsDirectory)
                 self.asrModels = models
 
                 let manager = SlidingWindowAsrManager()
@@ -1023,6 +1044,22 @@ private var globalBridge: FluidAudioBridgeInternal?
 @_cdecl("fluidaudio_bridge_create")
 public func fluidaudio_bridge_create() -> UnsafeMutableRawPointer? {
     let bridge = FluidAudioBridgeInternal()
+    globalBridge = bridge
+    return Unmanaged.passRetained(bridge).toOpaque()
+}
+
+/// Same as `fluidaudio_bridge_create`, but every model this bridge downloads is rooted at
+/// `dir` instead of FluidAudio's two platform defaults. A null or empty `dir` behaves exactly
+/// like `fluidaudio_bridge_create`.
+@_cdecl("fluidaudio_bridge_create_with_models_dir")
+public func fluidaudio_bridge_create_with_models_dir(
+    _ dir: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    var root: URL?
+    if let dir, case let path = String(cString: dir), !path.isEmpty {
+        root = URL(fileURLWithPath: path, isDirectory: true)
+    }
+    let bridge = FluidAudioBridgeInternal(modelsRoot: root)
     globalBridge = bridge
     return Unmanaged.passRetained(bridge).toOpaque()
 }

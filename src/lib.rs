@@ -80,6 +80,25 @@ impl FluidAudio {
         Ok(Self { bridge })
     }
 
+    /// Create an instance whose models all live under `dir`.
+    ///
+    /// By default FluidAudio spreads downloads across two platform locations —
+    /// `~/Library/Application Support/FluidAudio/Models` for ASR, VAD and diarization, and
+    /// `~/.cache/fluidaudio` for TTS — plus a compiled-model cache this crate owns. Embedders
+    /// that manage their own cache directory (and their own uninstall) can point all of them
+    /// at one root instead.
+    ///
+    /// The directory is used as the *base*: each subsystem still appends its own repository
+    /// folder, so an existing tree produced by the defaults can be moved under `dir` wholesale.
+    pub fn with_models_dir<P: AsRef<Path>>(dir: P) -> Result<Self, FluidAudioError> {
+        let dir = dir.as_ref().to_str().ok_or_else(|| {
+            FluidAudioError::BridgeError("models dir is not valid UTF-8".to_string())
+        })?;
+        let bridge = ffi::FluidAudioBridge::new_with_models_dir(dir)
+            .ok_or_else(|| FluidAudioError::BridgeError("Failed to create bridge".to_string()))?;
+        Ok(Self { bridge })
+    }
+
     // ========== ASR Methods ==========
 
     /// Initialize the ASR (Automatic Speech Recognition) engine
