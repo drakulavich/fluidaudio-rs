@@ -80,16 +80,29 @@ impl FluidAudio {
         Ok(Self { bridge })
     }
 
-    /// Create an instance whose models all live under `dir`.
+    /// Create an instance that keeps its models under `dir` instead of the platform defaults.
     ///
-    /// By default FluidAudio spreads downloads across two platform locations —
-    /// `~/Library/Application Support/FluidAudio/Models` for ASR, VAD and diarization, and
-    /// `~/.cache/fluidaudio` for TTS — plus a compiled-model cache this crate owns. Embedders
-    /// that manage their own cache directory (and their own uninstall) can point all of them
-    /// at one root instead.
+    /// `dir` is a base: each subsystem appends its own repository folder, so a custom root ends
+    /// up holding `parakeet-tdt-0.6b-v3/`, `kokoro-82m-coreml/ANE/` and
+    /// `fluidaudio-rs/SortformerCompiled/` side by side. It is not a drop-in replacement for
+    /// either default location, because the defaults are two separate trees.
     ///
-    /// The directory is used as the *base*: each subsystem still appends its own repository
-    /// folder, so an existing tree produced by the defaults can be moved under `dir` wholesale.
+    /// # What this covers
+    ///
+    /// Rooted: Parakeet ASR (batch and streaming), the KokoroAne model chain, and this crate's
+    /// compiled-Sortformer cache.
+    ///
+    /// **Not** rooted, and still written to the platform defaults:
+    ///
+    /// * VAD, offline diarization and Qwen3 ASR — upstream accepts a directory for each, but
+    ///   this bridge does not pass one yet.
+    /// * English Kokoro G2P assets. `KokoroAneManager` passes `nil` for these deliberately:
+    ///   `G2PModel.shared` is a singleton pinned to `~/.cache/fluidaudio/Models/kokoro`, and
+    ///   honouring a custom directory would download to a path it cannot read. Mandarin does not
+    ///   use it.
+    ///
+    /// So this is isolation for the large model payloads, not yet a single tree you can delete
+    /// to uninstall.
     pub fn with_models_dir<P: AsRef<Path>>(dir: P) -> Result<Self, FluidAudioError> {
         let dir = dir.as_ref().to_str().ok_or_else(|| {
             FluidAudioError::BridgeError("models dir is not valid UTF-8".to_string())
