@@ -747,12 +747,7 @@ impl FluidAudio {
         max_audio_seconds: f64,
     ) -> Result<(), FluidAudioError> {
         self.bridge
-            .qwen3_streaming_start(
-                language,
-                min_audio_seconds,
-                chunk_seconds,
-                max_audio_seconds,
-            )
+            .qwen3_streaming_start(language, min_audio_seconds, chunk_seconds, max_audio_seconds)
             .map_err(FluidAudioError::from)
     }
 
@@ -766,7 +761,10 @@ impl FluidAudio {
     ///
     /// Call this repeatedly as audio chunks become available. The engine will return
     /// partial transcripts according to the configuration set in `qwen3_streaming_start`.
-    pub fn qwen3_streaming_feed(&self, samples: &[f32]) -> Result<Option<String>, FluidAudioError> {
+    pub fn qwen3_streaming_feed(
+        &self,
+        samples: &[f32],
+    ) -> Result<Option<String>, FluidAudioError> {
         self.bridge
             .qwen3_streaming_feed(samples)
             .map_err(FluidAudioError::from)

@@ -267,6 +267,21 @@ impl FluidAudioBridge {
         }
     }
 
+    /// The C entry point reports only success or `-1`, so the returned error
+    /// names the preset and nothing else. The actionable text — the CoreML
+    /// domain and code, or the download status for a missing voice pack — is
+    /// written to **stderr** by the Swift side, not carried back across the
+    /// boundary. A caller diagnosing a failure has to read it there. Two real
+    /// examples of what only stderr shows:
+    ///
+    /// ```text
+    /// Kokoro init error: invalidResponse(description: "am_michael voice pack", statusCode: 404)
+    /// Kokoro synthesize error: predictionFailed(stage: "vocoder", ... "Failed to prepare
+    ///   the model for predictions. ML program was KokoroVocoder ...")
+    /// ```
+    ///
+    /// Both are indistinguishable from here — a missing voice and an
+    /// unusable Neural Engine arrive as the same `-1`.
     pub fn initialize_kokoro_with_compute_units(
         &self,
         default_voice: &str,
