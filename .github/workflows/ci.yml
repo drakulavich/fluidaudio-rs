@@ -25,16 +25,37 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
+      # Downloaded sources. Portable across images and toolchains, so a stale
+      # hit here is harmless and a prefix fallback is worth having.
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'Package.resolved') }}
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            cargo-registry-
+
+      # Build output. Not portable: `target/` holds binaries already linked
+      # against the Swift staticlib that build.rs produces in `.build/`, so the
+      # two have to be cached and invalidated together — caching `target/`
+      # alone lets a linked binary survive while the library it points at does
+      # not. Both are also specific to the image and the Xcode inside it.
+      #
+      # Hence: no restore-keys. A prefix fallback is what makes a cache unsound
+      # here — it hands the job the *nearest* build tree rather than a matching
+      # one, and `runner.os` is "macOS" for every macOS image, so a macos-14
+      # tree would restore into a macos-15 job. Rebuilding takes well under a
+      # minute; debugging a binary linked on another image does not.
+      - name: Cache build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            .build
+          # macos-15 is the `runs-on` above — keep the two in step.
+          key: build-macos-15-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('**/Cargo.lock', 'Package.resolved') }}
 
       - name: Build library
         run: cargo build --lib
