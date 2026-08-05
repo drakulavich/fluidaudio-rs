@@ -173,21 +173,17 @@ class FluidAudioBridgeInternal {
         }
     }
 
-    /// Maps the C-ABI selector to the presets FluidAudio itself publishes. An unrecognised
-    /// *value* falls back to `.default` so a caller that learns a new preset first degrades to
-    /// the old behaviour. This says nothing about missing *symbols*: the Swift package is
-    /// statically linked by build.rs, so an absent entry point is a link error, not a fallback.
-    static func kokoroComputeUnits(for selector: Int32) -> KokoroAneComputeUnits {
-        switch selector {
-        case 1: return .cpuAndGpu
-        case 2: return .allAne
-        case 3: return .cpuOnly
-        default: return .default
-        }
-    }
-
+    /// `computeUnits` maps onto `KokoroAneComputeUnits`. `.default` keeps
+    /// FluidAudio's empirical per-stage mapping, which pins Albert / PostAlbert /
+    /// Alignment / Vocoder to the Neural Engine. Callers running where no ANE is
+    /// exposed — a virtualised macOS guest, e.g. a GitHub-hosted `macos-14`
+    /// runner — must pass `.cpuAndGpu` or `.cpuOnly`. Note the failure does not
+    /// land here: `KokoroAneManager.initialize` only downloads and loads the
+    /// mlmodelcs, so this call succeeds and `synthesizeKokoro` then throws
+    /// `predictionFailed(stage: "vocoder", ...)` wrapping "Failed to prepare the
+    /// model for predictions" on the first prediction.
     func initializeKokoro(
-        defaultVoice: String, lang: String, computeUnits: KokoroAneComputeUnits = .default
+        defaultVoice: String, lang: String, computeUnits: TtsComputeUnitPreset = .default
     ) throws {
         let semaphore = DispatchSemaphore(value: 0)
         var initError: Error?
@@ -199,7 +195,7 @@ class FluidAudioBridgeInternal {
                 let variant = Self.kokoroVariant(for: lang)
                 let manager = KokoroAneManager(
                     variant: variant, defaultVoice: defaultVoice, directory: self.modelsRoot,
-                    computeUnits: computeUnits)
+                    computeUnits: KokoroAneComputeUnits(preset: computeUnits))
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {
