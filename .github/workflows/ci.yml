@@ -120,9 +120,12 @@ jobs:
       - name: Synthesize under each preset
         run: |
           set +e
+          # af_heart, not am_michael: it is the only English voice in the hosted
+          # bundle. A dev machine with a pre-staged bundle hides this; a clean
+          # runner gets a 404 and the probe measures nothing.
           run_preset() {
             cargo run -q --example kokoro --features tts -- \
-              "Compute unit probe on a hosted runner" am_michael en-us "$1" \
+              "Compute unit probe on a hosted runner" af_heart en-us "$1" \
               > "/tmp/kokoro-$1.wav" 2> "/tmp/kokoro-$1.err"
             echo $?
           }
@@ -141,6 +144,21 @@ jobs:
           done
           echo "===== exits: default=$default_exit cpu-and-gpu=$cpu_gpu_exit ====="
 
+          # A model/voice download failure aborts init before any prediction, so
+          # it hits every preset identically and proves nothing about compute
+          # units. Calling that "the escape hatch failed" would be a false
+          # negative — the first run of this probe did exactly that, on a 404.
+          setup_failure=""
+          if [ "$default_exit" -ne 0 ] && [ "$cpu_gpu_exit" -ne 0 ]; then
+            for pat in "statusCode" "invalidResponse" "downloadFailed" "URLError"; do
+              if grep -q "$pat" /tmp/kokoro-default.err 2>/dev/null \
+                 && grep -q "$pat" /tmp/kokoro-cpu-and-gpu.err 2>/dev/null; then
+                setup_failure=$(grep -h -m1 "$pat" /tmp/kokoro-default.err | tr -d '`')
+                break
+              fi
+            done
+          fi
+
           {
             echo "## Result"
             echo
@@ -150,7 +168,11 @@ jobs:
             echo "| \`cpu-and-gpu\` | $cpu_gpu_exit | ${cpu_gpu_bytes:-—} |"
             echo
             echo "### Verdict"
-            if [ "$default_exit" -ne 0 ] && [ "$cpu_gpu_exit" -eq 0 ]; then
+            if [ -n "$setup_failure" ]; then
+              echo "**Inconclusive** — the run never reached a compute-unit decision."
+              echo "Both presets failed the same way before any prediction ("
+              echo "\`$setup_failure\`), so this says nothing about the ANE either way."
+            elif [ "$default_exit" -ne 0 ] && [ "$cpu_gpu_exit" -eq 0 ]; then
               echo "Premise **confirmed**: the ANE-pinned default fails here and \`cpu-and-gpu\` works."
             elif [ "$default_exit" -eq 0 ] && [ "$cpu_gpu_exit" -eq 0 ]; then
               echo "Premise **not reproduced**: the default mapping synthesizes fine on this runner."
@@ -168,7 +190,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # `default` failing is the hypothesis; only a broken escape hatch is a
-          # build failure.
+          # build failure. A setup failure fails too, but says so — it is a
+          # broken probe, not a result.
+          if [ -n "$setup_failure" ]; then
+            echo "::error::probe never reached a compute-unit decision: $setup_failure"
+            exit 1
+          fi
           if [ "$cpu_gpu_exit" -ne 0 ]; then
             echo "::error::cpu-and-gpu synthesis failed (exit $cpu_gpu_exit)"
             exit 1
