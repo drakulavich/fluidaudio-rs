@@ -82,13 +82,19 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Select Xcode 16
+      # The macos-14 image has no plain `Xcode_16.app` — it ships 15.x plus
+      # Xcode_16.1/16.2 — and its *default* toolchain is Swift 5.10, which
+      # cannot build FluidAudio 0.14.8 (Swift tools 6.0). Pick the newest 16.x
+      # actually present rather than guessing a filename.
+      - name: Select the newest Xcode 16
         run: |
           ls /Applications | grep -i "^Xcode" || true
-          if [ -d /Applications/Xcode_16.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.app
+          xcode=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$xcode" ]; then
+            echo "Selecting $xcode"
+            sudo xcode-select -s "$xcode"
           else
-            echo "::warning::Xcode 16 not found on this image; FluidAudio needs Swift 6."
+            echo "::warning::No Xcode 16.x on this image; FluidAudio needs Swift 6."
           fi
           swift --version
 
