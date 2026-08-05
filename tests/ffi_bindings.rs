@@ -11,7 +11,7 @@
 //! with `#[ignore]` and can be run via:
 //!     cargo test --test ffi_bindings -- --ignored
 
-use fluidaudio_rs::{FluidAudio, FluidAudioError};
+use fluidaudio_rs::{FluidAudio, FluidAudioError, KokoroComputeUnits};
 
 /// The bridge can be created and dropped without panicking. Drop must not
 /// crash even if no `init_*` method was ever called.
@@ -391,5 +391,33 @@ fn models_dir_receives_the_kokoro_repo() {
         "expected the Kokoro repo under {}, found: {:?}",
         root.display(),
         std::fs::read_dir(&root).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+}
+
+/// Kokoro synthesises with the Neural Engine excluded. This is the path a host
+/// without an ANE must take: the default mapping pins the vocoder stage to the
+/// ANE, and CoreML cannot prepare that program where none is exposed — the load
+/// still succeeds, so the failure only shows up here, at the first prediction.
+///
+/// Unlike the unit tests in `src/lib.rs`, this one actually crosses the FFI
+/// boundary and runs the Swift parser, so it is the only thing that would catch
+/// `as_str` drifting away from `TtsComputeUnitPreset(cliValue:)`.
+///
+/// Uses the default cache; downloads ~200 MB if Kokoro was never fetched.
+#[test]
+#[ignore]
+fn kokoro_synthesises_without_the_neural_engine() {
+    let audio = FluidAudio::new().expect("bridge");
+    audio
+        .init_kokoro_with_compute_units("af_heart", "en-us", KokoroComputeUnits::CpuAndGpu)
+        .expect("kokoro init on cpu+gpu");
+
+    let wav = audio
+        .synthesize_kokoro("The quick brown fox.", "af_heart", 1.0)
+        .expect("synthesis on cpu+gpu");
+    assert!(
+        wav.len() > 44,
+        "expected audio beyond a bare WAV header, got {} bytes",
+        wav.len()
     );
 }
