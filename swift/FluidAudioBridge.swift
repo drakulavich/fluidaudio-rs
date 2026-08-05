@@ -173,7 +173,15 @@ class FluidAudioBridgeInternal {
         }
     }
 
-    func initializeKokoro(defaultVoice: String, lang: String) throws {
+    /// `computeUnits` maps onto `KokoroAneComputeUnits`. `.default` keeps
+    /// FluidAudio's empirical per-stage mapping, which pins Albert / PostAlbert /
+    /// Alignment / Vocoder to the Neural Engine. Callers running where no ANE is
+    /// exposed — a virtualised macOS guest, e.g. a GitHub-hosted `macos-14`
+    /// runner — must pass `.cpuAndGpu` or `.cpuOnly`, or CoreML fails to prepare
+    /// those stages ("Failed to prepare the model for predictions").
+    func initializeKokoro(
+        defaultVoice: String, lang: String, computeUnits: TtsComputeUnitPreset = .default
+    ) throws {
         let semaphore = DispatchSemaphore(value: 0)
         var initError: Error?
 
@@ -183,7 +191,8 @@ class FluidAudioBridgeInternal {
                 // so `--rate` applies correctly (unlike the prior `voiceSpeed:` path).
                 let variant = Self.kokoroVariant(for: lang)
                 let manager = KokoroAneManager(
-                    variant: variant, defaultVoice: defaultVoice, directory: self.modelsRoot)
+                    variant: variant, defaultVoice: defaultVoice, directory: self.modelsRoot,
+                    computeUnits: KokoroAneComputeUnits(preset: computeUnits))
                 try await manager.initialize(preloadVoices: [defaultVoice])
                 self.kokoroManager = manager
             } catch {
