@@ -14,12 +14,12 @@ private func kokoroLog(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-/// `computeUnits` is the kebab-case preset name `TtsComputeUnitPreset(cliValue:)`
-/// accepts (`default`, `all-ane`, `cpu-and-gpu`, `cpu-only`). NULL or empty keeps
-/// the backend's empirical per-stage mapping. An unrecognised value is a caller
-/// bug, so it fails rather than silently synthesising on the wrong units.
-@_cdecl("fluidaudio_initialize_kokoro")
-public func fluidaudio_initialize_kokoro(
+/// Shared body of both init entry points. `computeUnits` is the kebab-case preset
+/// name `TtsComputeUnitPreset(cliValue:)` accepts (`default`, `all-ane`,
+/// `cpu-and-gpu`, `cpu-only`). NULL or empty keeps the backend's empirical
+/// per-stage mapping. An unrecognised value is a caller bug, so it fails rather
+/// than silently synthesising on units the caller did not ask for.
+private func initializeKokoro(
     _ ptr: UnsafeMutableRawPointer?,
     _ defaultVoice: UnsafePointer<CChar>?,
     _ lang: UnsafePointer<CChar>?,
@@ -50,6 +50,31 @@ public func fluidaudio_initialize_kokoro(
         kokoroLog("Kokoro init error: \(error)")
         return -1
     }
+}
+
+/// Initialize on FluidAudio's empirical per-stage compute-unit mapping.
+///
+/// Kept at three parameters so the existing C symbol's arity is unchanged —
+/// anything linking these entry points from an older build keeps working.
+@_cdecl("fluidaudio_initialize_kokoro")
+public func fluidaudio_initialize_kokoro(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ defaultVoice: UnsafePointer<CChar>?,
+    _ lang: UnsafePointer<CChar>?
+) -> Int32 {
+    initializeKokoro(ptr, defaultVoice, lang, nil)
+}
+
+/// Same, but pins every pipeline stage to an explicit preset. See
+/// `initializeKokoro` for the accepted spellings and the failure contract.
+@_cdecl("fluidaudio_initialize_kokoro_with_compute_units")
+public func fluidaudio_initialize_kokoro_with_compute_units(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ defaultVoice: UnsafePointer<CChar>?,
+    _ lang: UnsafePointer<CChar>?,
+    _ computeUnits: UnsafePointer<CChar>?
+) -> Int32 {
+    initializeKokoro(ptr, defaultVoice, lang, computeUnits)
 }
 
 /// Synthesize `text` with `voice` at `speed`; returns a complete WAV byte buffer

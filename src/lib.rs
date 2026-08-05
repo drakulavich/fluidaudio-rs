@@ -531,7 +531,9 @@ impl FluidAudio {
     /// [`init_kokoro_with_compute_units`](Self::init_kokoro_with_compute_units)
     /// when the host has no usable Neural Engine.
     pub fn init_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), FluidAudioError> {
-        self.init_kokoro_with_compute_units(default_voice, lang, KokoroComputeUnits::Default)
+        self.bridge
+            .initialize_kokoro(default_voice, lang)
+            .map_err(FluidAudioError::from)
     }
 
     /// Initialize Kokoro TTS on an explicit CoreML compute-unit preset.
@@ -555,7 +557,7 @@ impl FluidAudio {
         compute_units: KokoroComputeUnits,
     ) -> Result<(), FluidAudioError> {
         self.bridge
-            .initialize_kokoro(default_voice, lang, compute_units.as_str())
+            .initialize_kokoro_with_compute_units(default_voice, lang, compute_units.as_str())
             .map_err(FluidAudioError::from)
     }
 
