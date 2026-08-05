@@ -19,8 +19,13 @@ jobs:
       - name: Select Xcode 16
         run: sudo xcode-select -s /Applications/Xcode_16.app
 
+      # Also emits a digest of the toolchain for the build cache below to key
+      # on. This has to stay ahead of that step, and after Xcode selection.
       - name: Show Swift version
-        run: swift --version
+        id: swift
+        run: |
+          swift --version
+          echo "id=$(swift --version 2>&1 | head -1 | shasum | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -41,7 +46,8 @@ jobs:
       # against the Swift staticlib that build.rs produces in `.build/`, so the
       # two have to be cached and invalidated together — caching `target/`
       # alone lets a linked binary survive while the library it points at does
-      # not. Both are also specific to the image and the Xcode inside it.
+      # not. Both are also specific to the image and to the Swift toolchain
+      # that produced them, hence the digest from the step above.
       #
       # Hence: no restore-keys. A prefix fallback is what makes a cache unsound
       # here — it hands the job the *nearest* build tree rather than a matching
@@ -55,7 +61,7 @@ jobs:
             target
             .build
           # macos-15 is the `runs-on` above — keep the two in step.
-          key: build-macos-15-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('**/Cargo.lock', 'Package.resolved') }}
+          key: build-macos-15-${{ runner.arch }}-swift${{ steps.swift.outputs.id }}-${{ hashFiles('**/Cargo.lock', 'Package.resolved') }}
 
       - name: Build library
         run: cargo build --lib
