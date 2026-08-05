@@ -133,6 +133,14 @@ jobs:
           default_bytes=$(bytes default)
           cpu_gpu_bytes=$(bytes cpu-and-gpu)
 
+          # Also to stdout: the step summary is not reachable from `gh run view`,
+          # so on failure the diagnosis has to be in the log itself.
+          for preset in default cpu-and-gpu; do
+            echo "===== $preset stderr ====="
+            cat "/tmp/kokoro-$preset.err" || true
+          done
+          echo "===== exits: default=$default_exit cpu-and-gpu=$cpu_gpu_exit ====="
+
           {
             echo "## Result"
             echo
