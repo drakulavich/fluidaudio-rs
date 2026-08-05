@@ -44,3 +44,118 @@ jobs:
 
       - name: Run library unit tests
         run: cargo test --lib
+
+  # ---------------------------------------------------------------------------
+  # TEMPORARY — delete once the result is recorded in PR #21.
+  #
+  # The compute-unit escape hatch exists because FluidAudio's default mapping
+  # pins four Kokoro stages (Albert / PostAlbert / Alignment / Vocoder) to the
+  # Neural Engine, which is *claimed* to be unusable on a virtualised macOS
+  # guest. The job above runs on macos-15, where the ANE works, so it cannot
+  # test that claim at all — the motivating case has never been reproduced in
+  # CI, only inferred from a downstream failure.
+  #
+  # This job runs the same synthesis on macos-14 under both presets and reports
+  # what actually happens. It measures rather than asserts: `default` failing is
+  # the hypothesis under test, so it does not fail the build. `cpu-and-gpu`
+  # failing does, because that is the escape hatch not working.
+  # ---------------------------------------------------------------------------
+  ane-escape-hatch-proof:
+    name: "TEMP: Kokoro compute units on macos-14"
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record host and Neural Engine visibility
+        run: |
+          {
+            echo "## Host"
+            echo '```'
+            sw_vers || true
+            uname -m || true
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+            echo "--- IORegistry entries matching ANE ---"
+            ioreg -l 2>/dev/null | grep -ci "ane" || echo "no matches"
+            echo "--- AppleNeuralEngine service ---"
+            ioreg -c AppleARMIODevice -d 1 2>/dev/null | grep -i "ane" | head -5 || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Select Xcode 16
+        run: |
+          ls /Applications | grep -i "^Xcode" || true
+          if [ -d /Applications/Xcode_16.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          else
+            echo "::warning::Xcode 16 not found on this image; FluidAudio needs Swift 6."
+          fi
+          swift --version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos14-probe-cargo-${{ hashFiles('**/Cargo.lock', 'Package.resolved') }}
+          restore-keys: |
+            macos14-probe-cargo-
+
+      # Built as its own step so a toolchain problem is distinguishable from an
+      # ANE problem: if this fails the job proves nothing about compute units.
+      - name: Build the example
+        run: cargo build --example kokoro --features tts
+
+      - name: Synthesize under each preset
+        run: |
+          set +e
+          run_preset() {
+            cargo run -q --example kokoro --features tts -- \
+              "Compute unit probe on a hosted runner" am_michael en-us "$1" \
+              > "/tmp/kokoro-$1.wav" 2> "/tmp/kokoro-$1.err"
+            echo $?
+          }
+          default_exit=$(run_preset default)
+          cpu_gpu_exit=$(run_preset cpu-and-gpu)
+
+          bytes() { grep -o 'WAV bytes: [0-9]*' "/tmp/kokoro-$1.err" | tail -1 | grep -o '[0-9]*'; }
+          default_bytes=$(bytes default)
+          cpu_gpu_bytes=$(bytes cpu-and-gpu)
+
+          {
+            echo "## Result"
+            echo
+            echo "| preset | exit | WAV bytes |"
+            echo "|---|---|---|"
+            echo "| \`default\` | $default_exit | ${default_bytes:-—} |"
+            echo "| \`cpu-and-gpu\` | $cpu_gpu_exit | ${cpu_gpu_bytes:-—} |"
+            echo
+            echo "### Verdict"
+            if [ "$default_exit" -ne 0 ] && [ "$cpu_gpu_exit" -eq 0 ]; then
+              echo "Premise **confirmed**: the ANE-pinned default fails here and \`cpu-and-gpu\` works."
+            elif [ "$default_exit" -eq 0 ] && [ "$cpu_gpu_exit" -eq 0 ]; then
+              echo "Premise **not reproduced**: the default mapping synthesizes fine on this runner."
+              echo "The escape hatch is still useful, but macos-14 is not evidence for needing it."
+            elif [ "$cpu_gpu_exit" -ne 0 ]; then
+              echo "\`cpu-and-gpu\` **failed** — the escape hatch does not rescue this host."
+            fi
+            echo
+            echo "<details><summary>default stderr</summary>"
+            echo; echo '```'; tail -40 /tmp/kokoro-default.err || true; echo '```'
+            echo "</details>"
+            echo "<details><summary>cpu-and-gpu stderr</summary>"
+            echo; echo '```'; tail -40 /tmp/kokoro-cpu-and-gpu.err || true; echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `default` failing is the hypothesis; only a broken escape hatch is a
+          # build failure.
+          if [ "$cpu_gpu_exit" -ne 0 ]; then
+            echo "::error::cpu-and-gpu synthesis failed (exit $cpu_gpu_exit)"
+            exit 1
+          fi
