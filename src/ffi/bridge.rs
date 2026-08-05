@@ -187,6 +187,7 @@ extern "C" {
         bridge: *mut std::ffi::c_void,
         default_voice: *const i8,
         lang: *const i8,
+        compute_units: *const i8,
     ) -> i32;
     fn fluidaudio_kokoro_synthesize(
         bridge: *mut std::ffi::c_void,
@@ -249,15 +250,29 @@ impl FluidAudioBridge {
         }
     }
 
-    pub fn initialize_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), String> {
+    pub fn initialize_kokoro(
+        &self,
+        default_voice: &str,
+        lang: &str,
+        compute_units: &str,
+    ) -> Result<(), String> {
         let c_voice = CString::new(default_voice).map_err(|_| "Invalid voice")?;
         let c_lang = CString::new(lang).map_err(|_| "Invalid lang")?;
-        let result =
-            unsafe { fluidaudio_initialize_kokoro(self.ptr, c_voice.as_ptr(), c_lang.as_ptr()) };
+        let c_units = CString::new(compute_units).map_err(|_| "Invalid compute units")?;
+        let result = unsafe {
+            fluidaudio_initialize_kokoro(
+                self.ptr,
+                c_voice.as_ptr(),
+                c_lang.as_ptr(),
+                c_units.as_ptr(),
+            )
+        };
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to initialize Kokoro".to_string())
+            Err(format!(
+                "Failed to initialize Kokoro (compute units: {compute_units})"
+            ))
         }
     }
 

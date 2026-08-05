@@ -65,6 +65,55 @@ impl From<String> for FluidAudioError {
     }
 }
 
+/// CoreML compute-unit preset for the Kokoro TTS pipeline.
+///
+/// Mirrors FluidAudio's `TtsComputeUnitPreset`; [`Self::as_str`] emits the same
+/// kebab-case spellings its `init?(cliValue:)` parser accepts, so the value
+/// round-trips across the FFI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KokoroComputeUnits {
+    /// FluidAudio's empirical per-stage mapping (Albert / PostAlbert /
+    /// Alignment / Vocoder on the Neural Engine).
+    #[default]
+    Default,
+    /// Every stage on `.cpuAndNeuralEngine`.
+    AllAne,
+    /// Every stage on `.cpuAndGPU` — skips the ANE entirely.
+    CpuAndGpu,
+    /// Every stage on `.cpuOnly`.
+    CpuOnly,
+}
+
+impl KokoroComputeUnits {
+    /// Canonical kebab-case name, as accepted by FluidAudio's
+    /// `TtsComputeUnitPreset(cliValue:)`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AllAne => "all-ane",
+            Self::CpuAndGpu => "cpu-and-gpu",
+            Self::CpuOnly => "cpu-only",
+        }
+    }
+}
+
+impl std::str::FromStr for KokoroComputeUnits {
+    type Err = FluidAudioError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "default" => Ok(Self::Default),
+            "all-ane" | "ane" | "neural-engine" => Ok(Self::AllAne),
+            "cpu-and-gpu" | "cpuandgpu" | "gpu" => Ok(Self::CpuAndGpu),
+            "cpu-only" | "cpu" | "cpuonly" => Ok(Self::CpuOnly),
+            other => Err(FluidAudioError::BridgeError(format!(
+                "unknown Kokoro compute-units preset '{other}' \
+                 (expected: default, all-ane, cpu-and-gpu, cpu-only)"
+            ))),
+        }
+    }
+}
+
 /// Main FluidAudio interface for Rust
 ///
 /// Provides access to ASR and VAD functionality.
@@ -445,9 +494,32 @@ impl FluidAudio {
     /// `lang` selects the KokoroAne variant in the Swift bridge (`zh` → Mandarin,
     /// everything else → English). Downloads the variant's model on first run
     /// (FluidAudio-managed cache).
+    ///
+    /// Uses [`KokoroComputeUnits::Default`]; see
+    /// [`init_kokoro_with_compute_units`](Self::init_kokoro_with_compute_units)
+    /// when the host has no usable Neural Engine.
     pub fn init_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), FluidAudioError> {
+        self.init_kokoro_with_compute_units(default_voice, lang, KokoroComputeUnits::Default)
+    }
+
+    /// Initialize Kokoro TTS on an explicit CoreML compute-unit preset.
+    ///
+    /// FluidAudio's default per-stage mapping pins the Albert, PostAlbert,
+    /// Alignment and Vocoder stages to the Neural Engine. Where no ANE is
+    /// exposed — notably a virtualised macOS guest, such as a GitHub-hosted
+    /// `macos-14` runner — CoreML cannot prepare those stages and init fails
+    /// with "Failed to prepare the model for predictions". Passing
+    /// [`KokoroComputeUnits::CpuAndGpu`] (or `CpuOnly`) keeps synthesis working
+    /// there, and doubles as the debugging baseline FluidAudio's `KokoroAne.md`
+    /// recommends for artefact investigations.
+    pub fn init_kokoro_with_compute_units(
+        &self,
+        default_voice: &str,
+        lang: &str,
+        compute_units: KokoroComputeUnits,
+    ) -> Result<(), FluidAudioError> {
         self.bridge
-            .initialize_kokoro(default_voice, lang)
+            .initialize_kokoro(default_voice, lang, compute_units.as_str())
             .map_err(FluidAudioError::from)
     }
 
@@ -669,7 +741,12 @@ impl FluidAudio {
         max_audio_seconds: f64,
     ) -> Result<(), FluidAudioError> {
         self.bridge
-            .qwen3_streaming_start(language, min_audio_seconds, chunk_seconds, max_audio_seconds)
+            .qwen3_streaming_start(
+                language,
+                min_audio_seconds,
+                chunk_seconds,
+                max_audio_seconds,
+            )
             .map_err(FluidAudioError::from)
     }
 
@@ -683,10 +760,7 @@ impl FluidAudio {
     ///
     /// Call this repeatedly as audio chunks become available. The engine will return
     /// partial transcripts according to the configuration set in `qwen3_streaming_start`.
-    pub fn qwen3_streaming_feed(
-        &self,
-        samples: &[f32],
-    ) -> Result<Option<String>, FluidAudioError> {
+    pub fn qwen3_streaming_feed(&self, samples: &[f32]) -> Result<Option<String>, FluidAudioError> {
         self.bridge
             .qwen3_streaming_feed(samples)
             .map_err(FluidAudioError::from)
@@ -803,5 +877,33 @@ mod tests {
         // Note: This test will fail until Swift bridge is properly linked
         // For now, just test the types exist
         let _ = FluidAudioError::NotInitialized("test".to_string());
+    }
+
+    #[test]
+    fn compute_units_round_trip_through_cli_spellings() {
+        // `as_str` must stay inside what FluidAudio's `TtsComputeUnitPreset`
+        // parser accepts — the FFI passes the string, not the enum.
+        for units in [
+            KokoroComputeUnits::Default,
+            KokoroComputeUnits::AllAne,
+            KokoroComputeUnits::CpuAndGpu,
+            KokoroComputeUnits::CpuOnly,
+        ] {
+            assert_eq!(units.as_str().parse::<KokoroComputeUnits>().unwrap(), units);
+        }
+        assert_eq!(KokoroComputeUnits::default(), KokoroComputeUnits::Default);
+    }
+
+    #[test]
+    fn compute_units_accepts_aliases_and_rejects_junk() {
+        assert_eq!(
+            "CPU-Only".parse::<KokoroComputeUnits>().unwrap(),
+            KokoroComputeUnits::CpuOnly
+        );
+        assert_eq!(
+            "gpu".parse::<KokoroComputeUnits>().unwrap(),
+            KokoroComputeUnits::CpuAndGpu
+        );
+        assert!("tpu".parse::<KokoroComputeUnits>().is_err());
     }
 }

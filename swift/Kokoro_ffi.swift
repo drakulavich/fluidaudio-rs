@@ -1,3 +1,4 @@
+import FluidAudio
 import Foundation
 
 // MARK: - Kokoro TTS C FFI
@@ -13,18 +14,37 @@ private func kokoroLog(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// `computeUnits` is the kebab-case preset name `TtsComputeUnitPreset(cliValue:)`
+/// accepts (`default`, `all-ane`, `cpu-and-gpu`, `cpu-only`). NULL or empty keeps
+/// the backend's empirical per-stage mapping. An unrecognised value is a caller
+/// bug, so it fails rather than silently synthesising on the wrong units.
 @_cdecl("fluidaudio_initialize_kokoro")
 public func fluidaudio_initialize_kokoro(
     _ ptr: UnsafeMutableRawPointer?,
     _ defaultVoice: UnsafePointer<CChar>?,
-    _ lang: UnsafePointer<CChar>?
+    _ lang: UnsafePointer<CChar>?,
+    _ computeUnits: UnsafePointer<CChar>?
 ) -> Int32 {
     guard let ptr = ptr else { return -1 }
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
     let voice = defaultVoice.map { String(cString: $0) } ?? "af_heart"
     let langString = lang.map { String(cString: $0) } ?? ""
+    let unitsString = computeUnits.map { String(cString: $0) } ?? ""
+
+    let preset: TtsComputeUnitPreset
+    if unitsString.isEmpty {
+        preset = .default
+    } else if let parsed = TtsComputeUnitPreset(cliValue: unitsString) {
+        preset = parsed
+    } else {
+        kokoroLog(
+            "Kokoro init error: unknown compute-units preset '\(unitsString)' "
+                + "(expected one of: \(TtsComputeUnitPreset.allCases.map(\.cliValue).joined(separator: ", ")))")
+        return -1
+    }
+
     do {
-        try bridge.initializeKokoro(defaultVoice: voice, lang: langString)
+        try bridge.initializeKokoro(defaultVoice: voice, lang: langString, computeUnits: preset)
         return 0
     } catch {
         kokoroLog("Kokoro init error: \(error)")
