@@ -38,7 +38,10 @@ use std::path::Path;
 use thiserror::Error;
 
 // Re-export FFI types
-pub use ffi::{AsrResult, DiarizationSegment, SystemInfo, VadFrame};
+pub use ffi::{
+    AsrResult, DiarizationSegment, DiarizeCancelToken, DiarizeOutcome, DiarizeProgress, SystemInfo,
+    VadFrame,
+};
 
 /// Errors that can occur when using FluidAudio
 #[derive(Error, Debug)]
@@ -93,6 +96,54 @@ impl KokoroComputeUnits {
             Self::AllAne => "all-ane",
             Self::CpuAndGpu => "cpu-and-gpu",
             Self::CpuOnly => "cpu-only",
+        }
+    }
+}
+
+/// CoreML compute units the Sortformer diarization model is loaded on.
+///
+/// Unlike [`KokoroComputeUnits`] these are plain `MLComputeUnits` values, not a
+/// FluidAudio preset — the binding loads the `MLModel` itself, so it sets the
+/// configuration directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiarizeComputeUnits {
+    /// `MLComputeUnits.all` — CoreML picks per operation, Neural Engine included.
+    #[default]
+    All,
+    /// `.cpuAndNeuralEngine`, excluding the GPU.
+    CpuAndAne,
+    /// `.cpuAndGPU` — skips the ANE entirely, and with it the ~105 s first-load
+    /// ANE program compile.
+    CpuAndGpu,
+    /// `.cpuOnly`. Roughly 4x slower than `.all` on Apple Silicon.
+    CpuOnly,
+}
+
+impl DiarizeComputeUnits {
+    /// Canonical kebab-case name, as the Swift side parses it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::CpuAndAne => "cpu-and-ane",
+            Self::CpuAndGpu => "cpu-and-gpu",
+            Self::CpuOnly => "cpu-only",
+        }
+    }
+}
+
+impl std::str::FromStr for DiarizeComputeUnits {
+    type Err = FluidAudioError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "cpu-and-ane" | "ane" | "neural-engine" => Ok(Self::CpuAndAne),
+            "cpu-and-gpu" | "cpuandgpu" | "gpu" => Ok(Self::CpuAndGpu),
+            "cpu-only" | "cpu" | "cpuonly" => Ok(Self::CpuOnly),
+            other => Err(FluidAudioError::BridgeError(format!(
+                "unknown diarization compute-units preset '{other}' \
+                 (expected: all, cpu-and-ane, cpu-and-gpu, cpu-only)"
+            ))),
         }
     }
 }
@@ -462,6 +513,44 @@ impl FluidAudio {
         }
         self.bridge
             .diarize_file_with_models(&audio_str, &model_str)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// [`Self::diarize_file_with_models`] with progress reporting, cancellation and a
+    /// choice of compute units.
+    ///
+    /// `progress` fires once per processed chunk — roughly 11/s on `.all`, 3/s on
+    /// `.cpuOnly` — from the diarizer's own thread while this one is parked, which is
+    /// what makes a caller-side stall detector possible. It only starts after the
+    /// `MLModel` load, so "no progress yet" means the model is still loading; cold that
+    /// load is the ~105 s ANE program compile, and it is not interruptible.
+    ///
+    /// Cancelling via `cancel` returns [`DiarizeOutcome::Cancelled`] rather than an
+    /// error: the caller asked for it, so it is not a failure.
+    pub fn diarize_file_with_models_controlled<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        audio: P,
+        model_path: Q,
+        compute_units: DiarizeComputeUnits,
+        cancel: Option<&DiarizeCancelToken>,
+        progress: Option<&mut (dyn FnMut(DiarizeProgress) + Send)>,
+    ) -> Result<DiarizeOutcome, FluidAudioError> {
+        let audio_str = audio.as_ref().to_string_lossy();
+        if !audio.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(audio_str.to_string()));
+        }
+        let model_str = model_path.as_ref().to_string_lossy();
+        if !model_path.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(model_str.to_string()));
+        }
+        self.bridge
+            .diarize_file_with_models_controlled(
+                &audio_str,
+                &model_str,
+                compute_units.as_str(),
+                cancel,
+                progress,
+            )
             .map_err(FluidAudioError::from)
     }
 

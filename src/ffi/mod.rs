@@ -1,3 +1,6 @@
 pub mod bridge;
 
-pub use bridge::{AsrResult, DiarizationSegment, FluidAudioBridge, SystemInfo, VadFrame};
+pub use bridge::{
+    AsrResult, DiarizationSegment, DiarizeCancelToken, DiarizeOutcome, DiarizeProgress,
+    FluidAudioBridge, SystemInfo, VadFrame,
+};

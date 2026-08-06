@@ -172,6 +172,25 @@ extern "C" {
         out_count: *mut u32,
     ) -> i32;
 
+    fn fluidaudio_diarize_file_with_models_controlled(
+        bridge: *mut std::ffi::c_void,
+        audio_path: *const i8,
+        model_path: *const i8,
+        compute_units: *const i8,
+        cancel_token: *mut std::ffi::c_void,
+        progress: Option<DiarizeProgressTrampoline>,
+        progress_context: *mut std::ffi::c_void,
+        out_speaker_ids: *mut *mut *mut i8,
+        out_start_times: *mut *mut f32,
+        out_end_times: *mut *mut f32,
+        out_quality_scores: *mut *mut f32,
+        out_count: *mut u32,
+    ) -> i32;
+
+    fn fluidaudio_diarize_cancel_token_new() -> *mut std::ffi::c_void;
+    fn fluidaudio_diarize_cancel(token: *mut std::ffi::c_void);
+    fn fluidaudio_diarize_cancel_token_free(token: *mut std::ffi::c_void);
+
     // Pre-compile the diarization .mlpackage into a writable per-user cache and
     // load it once (warm-up; populates the CoreML ANE/e5rt cache).
     fn fluidaudio_compile_diarization_model(
@@ -181,6 +200,88 @@ extern "C" {
 }
 
 use std::ffi::{CStr, CString};
+
+/// Swift-facing shape of the diarization progress callback.
+pub type DiarizeProgressTrampoline =
+    extern "C" fn(context: *mut std::ffi::c_void, processed: u64, total: u64, chunks: u32);
+
+/// One diarization progress report: `processed_samples` of `total_samples` consumed
+/// after `chunks` model invocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiarizeProgress {
+    pub processed_samples: u64,
+    pub total_samples: u64,
+    pub chunks: u32,
+}
+
+/// Handle for stopping an in-flight [`FluidAudioBridge::diarize_file_with_models_controlled`].
+///
+/// Cancelling is sticky and idempotent: it may be requested before the call starts,
+/// after it has returned, or several times. Only the chunk loop is interruptible, so a
+/// cancel landing during the model load takes effect when the load finishes.
+pub struct DiarizeCancelToken {
+    ptr: *mut std::ffi::c_void,
+}
+
+// The Swift token serializes every mutation behind its own lock; that is the whole
+// point of it, since one thread cancels while another is parked inside the diarize call.
+unsafe impl Send for DiarizeCancelToken {}
+unsafe impl Sync for DiarizeCancelToken {}
+
+impl DiarizeCancelToken {
+    pub fn new() -> Self {
+        Self {
+            ptr: unsafe { fluidaudio_diarize_cancel_token_new() },
+        }
+    }
+
+    pub fn cancel(&self) {
+        unsafe { fluidaudio_diarize_cancel(self.ptr) }
+    }
+
+    fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.ptr
+    }
+}
+
+impl Default for DiarizeCancelToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for DiarizeCancelToken {
+    fn drop(&mut self) {
+        unsafe { fluidaudio_diarize_cancel_token_free(self.ptr) }
+    }
+}
+
+extern "C" fn diarize_progress_trampoline(
+    context: *mut std::ffi::c_void,
+    processed: u64,
+    total: u64,
+    chunks: u32,
+) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: `context` is the `&mut &mut dyn FnMut` parked on the caller's stack for
+    // the whole (synchronous) diarize call, and Swift invokes this from exactly one
+    // thread at a time — the diarizer holds its own lock across the chunk loop.
+    let callback = unsafe { &mut *(context as *mut &mut (dyn FnMut(DiarizeProgress) + Send)) };
+    callback(DiarizeProgress {
+        processed_samples: processed,
+        total_samples: total,
+        chunks,
+    });
+}
+
+/// Outcome of a cancellable diarization.
+#[derive(Debug)]
+pub enum DiarizeOutcome {
+    Completed(Vec<DiarizationSegment>),
+    Cancelled,
+}
 
 /// Safe wrapper for the FluidAudio bridge
 pub struct FluidAudioBridge {
@@ -261,7 +362,12 @@ impl FluidAudioBridge {
 
     /// Synthesize `text` with `voice` at `speed`; returns the complete WAV bytes
     /// produced by FluidAudio's KokoroAneManager (24 kHz mono 16-bit PCM (i16), peak-normalized).
-    pub fn kokoro_synthesize(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<u8>, String> {
+    pub fn kokoro_synthesize(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<Vec<u8>, String> {
         let c_text = CString::new(text).map_err(|_| "Invalid text")?;
         let c_voice = CString::new(voice).map_err(|_| "Invalid voice")?;
         let mut out_bytes: *mut u8 = std::ptr::null_mut();
@@ -354,6 +460,69 @@ impl FluidAudioBridge {
                 count,
             )
         })
+    }
+
+    /// `diarize_file_with_models` plus progress, cancellation and compute-unit choice.
+    /// `progress` is called from the diarizer's thread while this one is parked.
+    pub fn diarize_file_with_models_controlled(
+        &self,
+        audio_path: &str,
+        model_path: &str,
+        compute_units: &str,
+        cancel: Option<&DiarizeCancelToken>,
+        progress: Option<&mut (dyn FnMut(DiarizeProgress) + Send)>,
+    ) -> Result<DiarizeOutcome, String> {
+        let c_audio = CString::new(audio_path).map_err(|_| "Invalid audio path")?;
+        let c_model = CString::new(model_path).map_err(|_| "Invalid model path")?;
+        let c_units = CString::new(compute_units).map_err(|_| "Invalid compute units")?;
+
+        let mut speaker_ids_ptr: *mut *mut i8 = std::ptr::null_mut();
+        let mut start_times_ptr: *mut f32 = std::ptr::null_mut();
+        let mut end_times_ptr: *mut f32 = std::ptr::null_mut();
+        let mut quality_scores_ptr: *mut f32 = std::ptr::null_mut();
+        let mut count: u32 = 0;
+
+        let mut callback = progress;
+        let (trampoline, context) = match callback.as_mut() {
+            Some(cb) => (
+                Some(diarize_progress_trampoline as DiarizeProgressTrampoline),
+                cb as *mut &mut (dyn FnMut(DiarizeProgress) + Send) as *mut std::ffi::c_void,
+            ),
+            None => (None, std::ptr::null_mut()),
+        };
+
+        let result = unsafe {
+            fluidaudio_diarize_file_with_models_controlled(
+                self.ptr,
+                c_audio.as_ptr(),
+                c_model.as_ptr(),
+                c_units.as_ptr(),
+                cancel.map_or(std::ptr::null_mut(), DiarizeCancelToken::as_ptr),
+                trampoline,
+                context,
+                &mut speaker_ids_ptr,
+                &mut start_times_ptr,
+                &mut end_times_ptr,
+                &mut quality_scores_ptr,
+                &mut count,
+            )
+        };
+
+        match result {
+            0 => Ok(DiarizeOutcome::Completed(unsafe {
+                collect_diarization_segments(
+                    speaker_ids_ptr,
+                    start_times_ptr,
+                    end_times_ptr,
+                    quality_scores_ptr,
+                    count,
+                )
+            })),
+            -2 => Ok(DiarizeOutcome::Cancelled),
+            _ => Err(format!(
+                "Diarization (model path) failed (compute units: {compute_units})"
+            )),
+        }
     }
 
     pub fn transcribe_file(&self, path: &str) -> Result<AsrResult, String> {
@@ -720,9 +889,8 @@ impl FluidAudioBridge {
     pub fn itn_normalize_sentence(&self, text: &str) -> Result<String, String> {
         let c_text = CString::new(text).map_err(|_| "Invalid text (NUL byte)")?;
         let mut out_ptr: *mut i8 = std::ptr::null_mut();
-        let status = unsafe {
-            fluidaudio_itn_normalize_sentence(self.ptr, c_text.as_ptr(), &mut out_ptr)
-        };
+        let status =
+            unsafe { fluidaudio_itn_normalize_sentence(self.ptr, c_text.as_ptr(), &mut out_ptr) };
         if status != 0 {
             return Err("ITN normalize_sentence failed".to_string());
         }

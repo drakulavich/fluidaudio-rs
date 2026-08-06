@@ -11,7 +11,10 @@
 //! with `#[ignore]` and can be run via:
 //!     cargo test --test ffi_bindings -- --ignored
 
-use fluidaudio_rs::{FluidAudio, FluidAudioError, KokoroComputeUnits};
+use fluidaudio_rs::{
+    DiarizeCancelToken, DiarizeComputeUnits, DiarizeOutcome, DiarizeProgress, FluidAudio,
+    FluidAudioError, KokoroComputeUnits,
+};
 
 /// The bridge can be created and dropped without panicking. Drop must not
 /// crash even if no `init_*` method was ever called.
@@ -52,12 +55,18 @@ fn cleanup_is_idempotent() {
 #[test]
 fn availability_is_false_before_init() {
     let audio = FluidAudio::new().expect("bridge creation");
-    assert!(!audio.is_asr_available(), "ASR should be unavailable pre-init");
+    assert!(
+        !audio.is_asr_available(),
+        "ASR should be unavailable pre-init"
+    );
     assert!(
         !audio.is_streaming_asr_available(),
         "streaming ASR should be unavailable pre-init"
     );
-    assert!(!audio.is_vad_available(), "VAD should be unavailable pre-init");
+    assert!(
+        !audio.is_vad_available(),
+        "VAD should be unavailable pre-init"
+    );
     assert!(
         !audio.is_diarization_available(),
         "diarization should be unavailable pre-init"
@@ -78,7 +87,10 @@ fn system_info_round_trips_swift_strings() {
         info.platform
     );
     assert!(!info.chip_name.is_empty(), "chip name should be populated");
-    assert!(info.memory_gb > 0.0, "memory should be reported as positive");
+    assert!(
+        info.memory_gb > 0.0,
+        "memory should be reported as positive"
+    );
 }
 
 /// `is_apple_silicon()` reads `SystemInfo.isAppleSilicon` from Swift and
@@ -86,7 +98,10 @@ fn system_info_round_trips_swift_strings() {
 #[test]
 fn is_apple_silicon_matches_system_info() {
     let audio = FluidAudio::new().expect("bridge creation");
-    assert_eq!(audio.is_apple_silicon(), audio.system_info().is_apple_silicon);
+    assert_eq!(
+        audio.is_apple_silicon(),
+        audio.system_info().is_apple_silicon
+    );
 }
 
 /// `is_intel_mac()` and `is_apple_silicon()` must be mutually exclusive: a
@@ -274,13 +289,8 @@ fn asr_transcribe_file_is_stateless_across_calls() {
     let audio = FluidAudio::new().expect("bridge creation");
     audio.init_asr().expect("ASR init");
 
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/hello.wav");
-    assert!(
-        fixture.exists(),
-        "fixture not found at {:?}",
-        fixture
-    );
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.wav");
+    assert!(fixture.exists(), "fixture not found at {:?}", fixture);
 
     let first = audio.transcribe_file(&fixture).expect("first transcribe");
     let second = audio.transcribe_file(&fixture).expect("second transcribe");
@@ -396,4 +406,127 @@ fn kokoro_synthesises_without_the_neural_engine() {
         "expected audio beyond a bare WAV header, got {} bytes",
         wav.len()
     );
+}
+
+/// The controlled diarize entry point validates paths on the Rust side, like the
+/// plain one, so a bad path never reaches Swift.
+#[test]
+fn controlled_diarize_returns_file_not_found() {
+    let audio = FluidAudio::new().expect("bridge creation");
+    let err = audio
+        .diarize_file_with_models_controlled(
+            "/this/path/definitely/does/not/exist.wav",
+            "/this/path/definitely/does/not/exist.mlpackage",
+            DiarizeComputeUnits::All,
+            None,
+            None,
+        )
+        .expect_err("controlled diarize with missing audio must error");
+    assert!(matches!(err, FluidAudioError::FileNotFound(_)));
+}
+
+/// A cancel requested before the call starts must be honoured — the token is
+/// sticky, so the race between "start diarizing" and "stop" cannot be lost.
+///
+/// Runs against the caller's staged Sortformer package via
+/// `FLUIDAUDIO_TEST_DIARIZE_MODEL`; without it there is nothing to diarize.
+#[test]
+#[ignore]
+fn diarize_honours_a_cancel_requested_before_the_call() {
+    let (audio_path, model_path) = match diarize_test_inputs() {
+        Some(paths) => paths,
+        None => return,
+    };
+    let audio = FluidAudio::new().expect("bridge");
+    let token = DiarizeCancelToken::new();
+    token.cancel();
+
+    let outcome = audio
+        .diarize_file_with_models_controlled(
+            &audio_path,
+            &model_path,
+            DiarizeComputeUnits::All,
+            Some(&token),
+            None,
+        )
+        .expect("a cancelled diarize is not an error");
+    assert!(matches!(outcome, DiarizeOutcome::Cancelled));
+}
+
+/// Progress fires per chunk and advances monotonically to the full sample count.
+#[test]
+#[ignore]
+fn diarize_reports_monotonic_progress() {
+    let (audio_path, model_path) = match diarize_test_inputs() {
+        Some(paths) => paths,
+        None => return,
+    };
+    let audio = FluidAudio::new().expect("bridge");
+    let mut ticks: Vec<DiarizeProgress> = Vec::new();
+    let mut record = |p: DiarizeProgress| ticks.push(p);
+
+    let outcome = audio
+        .diarize_file_with_models_controlled(
+            &audio_path,
+            &model_path,
+            DiarizeComputeUnits::All,
+            None,
+            Some(&mut record),
+        )
+        .expect("diarize");
+
+    assert!(matches!(outcome, DiarizeOutcome::Completed(_)));
+    assert!(!ticks.is_empty(), "expected at least one progress report");
+    assert!(
+        ticks
+            .windows(2)
+            .all(|w| w[0].chunks < w[1].chunks && w[0].processed_samples <= w[1].processed_samples),
+        "progress must advance monotonically: {ticks:?}"
+    );
+    // Progress counts whole chunks, so a partial trailing chunk leaves the last
+    // report short of the total (measured: 1466880/1478762, 99.2%). Callers must
+    // not treat "processed == total" as the completion signal.
+    let last = ticks.last().expect("checked non-empty");
+    let ratio = last.processed_samples as f64 / last.total_samples as f64;
+    assert!(
+        (0.98..=1.0).contains(&ratio),
+        "the final report should cover nearly all samples, got {last:?}"
+    );
+}
+
+/// Cancelling mid-run stops within a chunk instead of running to completion.
+#[test]
+#[ignore]
+fn diarize_cancels_mid_run() {
+    let (audio_path, model_path) = match diarize_test_inputs() {
+        Some(paths) => paths,
+        None => return,
+    };
+    let audio = FluidAudio::new().expect("bridge");
+    let token = std::sync::Arc::new(DiarizeCancelToken::new());
+    let trip = std::sync::Arc::clone(&token);
+    let mut on_progress = move |p: DiarizeProgress| {
+        if p.chunks >= 3 {
+            trip.cancel();
+        }
+    };
+
+    let outcome = audio
+        .diarize_file_with_models_controlled(
+            &audio_path,
+            &model_path,
+            DiarizeComputeUnits::All,
+            Some(&token),
+            Some(&mut on_progress),
+        )
+        .expect("a cancelled diarize is not an error");
+    assert!(matches!(outcome, DiarizeOutcome::Cancelled));
+}
+
+/// Audio and model paths for the diarization tests, or `None` when the caller
+/// has not staged a Sortformer package to test against.
+fn diarize_test_inputs() -> Option<(String, String)> {
+    let model = std::env::var("FLUIDAUDIO_TEST_DIARIZE_MODEL").ok()?;
+    let audio = std::env::var("FLUIDAUDIO_TEST_DIARIZE_AUDIO").ok()?;
+    Some((audio, model))
 }

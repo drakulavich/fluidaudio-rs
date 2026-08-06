@@ -28,6 +28,9 @@ class FluidAudioBridgeInternal {
     // model path so repeated in-process diarize calls skip the reload. Guarded by a lock
     // — the Rust bridge is Send+Sync and may be entered concurrently from multiple threads.
     private let sortformerCacheLock = NSLock()
+    // Keyed by "<modelPath>|<computeUnits>": the same package loaded on different
+    // compute units is a different MLModel, and mixing them silently returns the
+    // caller units it did not ask for.
     private var sortformerModelCache: [String: MLModel] = [:]
 
     /// Base directory for the models this bridge roots: Parakeet ASR, the KokoroAne chain and
@@ -413,13 +416,16 @@ class FluidAudioBridgeInternal {
     /// We cache the `MLModel` (thread-safe, expensive to load) and build a fresh
     /// `SortformerModels` per call — `SortformerModels` owns mutable scratch buffers that
     /// must not be shared across concurrent diarizations.
-    private func cachedSortformerModel(modelPath: String) async throws -> MLModel {
-        // Key by raw path: a hit returns with zero filesystem I/O. The content
+    private func cachedSortformerModel(modelPath: String, computeUnits: MLComputeUnits) async throws
+        -> MLModel
+    {
+        // Key by raw path + units: a hit returns with zero filesystem I/O. The content
         // fingerprint (which requires walking the bundle) is computed only on the miss
         // path, inside `compiledModelURL`, to name the on-disk compiled artifact — that
         // disk cache is where content invalidation matters (across processes/versions).
+        let key = "\(modelPath)|\(computeUnits.rawValue)"
         sortformerCacheLock.lock()
-        if let cached = sortformerModelCache[modelPath] {
+        if let cached = sortformerModelCache[key] {
             sortformerCacheLock.unlock()
             return cached
         }
@@ -427,13 +433,13 @@ class FluidAudioBridgeInternal {
 
         let url = try await Self.compiledModelURL(forModelPath: modelPath, root: modelsRoot)
         let cfg = MLModelConfiguration()
-        cfg.computeUnits = .all
+        cfg.computeUnits = computeUnits
         let model = try MLModel(contentsOf: url, configuration: cfg)
 
         sortformerCacheLock.lock()
         defer { sortformerCacheLock.unlock() }
-        if let existing = sortformerModelCache[modelPath] { return existing }
-        sortformerModelCache[modelPath] = model
+        if let existing = sortformerModelCache[key] { return existing }
+        sortformerModelCache[key] = model
         return model
     }
 
@@ -445,30 +451,58 @@ class FluidAudioBridgeInternal {
     /// `SortformerNvidiaLow_v2.mlpackage` (fifoLen=188); a mismatched config is a hard
     /// CoreML tensor-shape error at runtime.
     func diarizeFileWithModels(audioPath: String, modelPath: String) throws -> [BridgeDiarizationSegment] {
+        try diarizeFileWithModels(
+            audioPath: audioPath,
+            modelPath: modelPath,
+            computeUnits: .all,
+            cancelToken: nil,
+            progress: nil
+        )
+    }
+
+    /// As above, but reporting per-chunk progress, honouring `cancelToken`, and loading
+    /// the model on `computeUnits`.
+    ///
+    /// Only the `processComplete` loop is interruptible: it polls
+    /// `Task.checkCancellation()` between chunks, so cancelling stops within one chunk
+    /// (~0.1 s). The `MLModel` load ahead of it is a single synchronous CoreML call that
+    /// cannot be interrupted — cold, that is the ~105 s ANE program compile, and a cancel
+    /// arriving during it only takes effect once the load returns.
+    func diarizeFileWithModels(
+        audioPath: String,
+        modelPath: String,
+        computeUnits: MLComputeUnits,
+        cancelToken: DiarizeCancelToken?,
+        progress: SortformerDiarizer.ProgressCallback?
+    ) throws -> [BridgeDiarizationSegment] {
         let semaphore = DispatchSemaphore(value: 0)
         var timeline: DiarizerTimeline?
         var diarizeError: Error?
 
-        Task {
+        let task = Task {
             do {
+                try Task.checkCancellation()
                 let diarizer = SortformerDiarizer(
                     config: SortformerConfig.balancedV2,
                     timelineConfig: DiarizerTimelineConfig.sortformerDefault
                 )
-                let model = try await self.cachedSortformerModel(modelPath: modelPath)
+                let model = try await self.cachedSortformerModel(
+                    modelPath: modelPath, computeUnits: computeUnits)
                 let models = try SortformerModels(config: SortformerConfig.balancedV2, main: model)
                 diarizer.initialize(models: models)
                 timeline = try diarizer.processComplete(
                     audioFileURL: URL(fileURLWithPath: audioPath),
                     keepingEnrolledSpeakers: nil,
                     finalizeOnCompletion: true,
-                    progressCallback: nil
+                    progressCallback: progress
                 )
             } catch {
                 diarizeError = error
             }
             semaphore.signal()
         }
+        cancelToken?.adopt(task)
+        defer { cancelToken?.release() }
 
         semaphore.wait()
 
@@ -506,7 +540,7 @@ class FluidAudioBridgeInternal {
 
         Task {
             do {
-                _ = try await self.cachedSortformerModel(modelPath: modelPath)
+                _ = try await self.cachedSortformerModel(modelPath: modelPath, computeUnits: .all)
             } catch {
                 compileError = error
             }
