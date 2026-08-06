@@ -456,12 +456,18 @@ class FluidAudioBridgeInternal {
             modelPath: modelPath,
             computeUnits: .all,
             cancelToken: nil,
+            onModelReady: nil,
             progress: nil
         )
     }
 
     /// As above, but reporting per-chunk progress, honouring `cancelToken`, and loading
     /// the model on `computeUnits`.
+    ///
+    /// `onModelReady` fires once the `MLModel` is loaded and the diarizer initialised,
+    /// which is the boundary between model work (fixed cost, cold ~105 s) and audio work
+    /// (scales with the file): `processComplete` reads and resamples the whole file before
+    /// the first chunk, so without this marker the two are indistinguishable from outside.
     ///
     /// Only the `processComplete` loop is interruptible: it polls
     /// `Task.checkCancellation()` between chunks, so cancelling stops within one chunk
@@ -473,6 +479,7 @@ class FluidAudioBridgeInternal {
         modelPath: String,
         computeUnits: MLComputeUnits,
         cancelToken: DiarizeCancelToken?,
+        onModelReady: (() -> Void)?,
         progress: SortformerDiarizer.ProgressCallback?
     ) throws -> [BridgeDiarizationSegment] {
         let semaphore = DispatchSemaphore(value: 0)
@@ -490,6 +497,7 @@ class FluidAudioBridgeInternal {
                     modelPath: modelPath, computeUnits: computeUnits)
                 let models = try SortformerModels(config: SortformerConfig.balancedV2, main: model)
                 diarizer.initialize(models: models)
+                onModelReady?()
                 timeline = try diarizer.processComplete(
                     audioFileURL: URL(fileURLWithPath: audioPath),
                     keepingEnrolledSpeakers: nil,

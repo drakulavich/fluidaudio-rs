@@ -7,7 +7,7 @@
 //! A 4th arg (`all`, `cpu-and-ane`, `cpu-and-gpu`, `cpu-only`) switches to the
 //! controlled API, which also prints per-chunk progress.
 
-use fluidaudio_rs::{DiarizeComputeUnits, DiarizeOutcome, DiarizeProgress, FluidAudio};
+use fluidaudio_rs::{DiarizeComputeUnits, DiarizeEvent, DiarizeOutcome, FluidAudio};
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,16 +35,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Using pre-staged Sortformer model on {}: {model_path}",
             units.as_str()
         );
-        let mut on_progress = |p: DiarizeProgress| {
-            let pct = p.processed_samples as f64 / p.total_samples.max(1) as f64 * 100.0;
-            eprintln!("  chunk {} — {pct:.1}%", p.chunks);
+        let started = std::time::Instant::now();
+        let mut on_event = |event: DiarizeEvent| match event {
+            DiarizeEvent::ModelReady => {
+                eprintln!("  model ready in {:.1}s", started.elapsed().as_secs_f32())
+            }
+            DiarizeEvent::Progress(p) => {
+                let pct = p.processed_samples as f64 / p.total_samples.max(1) as f64 * 100.0;
+                eprintln!("  chunk {} — {pct:.1}%", p.chunks);
+            }
         };
         match audio.diarize_file_with_models_controlled(
             audio_path,
             model_path,
             units,
             None,
-            Some(&mut on_progress),
+            Some(&mut on_event),
         )? {
             DiarizeOutcome::Completed(segments) => segments,
             DiarizeOutcome::Cancelled => return Err("diarization was cancelled".into()),

@@ -39,8 +39,8 @@ use thiserror::Error;
 
 // Re-export FFI types
 pub use ffi::{
-    AsrResult, DiarizationSegment, DiarizeCancelToken, DiarizeOutcome, DiarizeProgress, SystemInfo,
-    VadFrame,
+    AsrResult, DiarizationSegment, DiarizeCancelToken, DiarizeEvent, DiarizeOutcome,
+    DiarizeProgress, SystemInfo, VadFrame,
 };
 
 /// Errors that can occur when using FluidAudio
@@ -519,11 +519,14 @@ impl FluidAudio {
     /// [`Self::diarize_file_with_models`] with progress reporting, cancellation and a
     /// choice of compute units.
     ///
-    /// `progress` fires once per processed chunk — roughly 11/s on `.all`, 3/s on
-    /// `.cpuOnly` — from the diarizer's own thread while this one is parked, which is
-    /// what makes a caller-side stall detector possible. It only starts after the
-    /// `MLModel` load, so "no progress yet" means the model is still loading; cold that
-    /// load is the ~105 s ANE program compile, and it is not interruptible.
+    /// `observer` fires from the diarizer's own thread while this one is parked, which
+    /// is what makes a caller-side stall detector possible.
+    /// [`DiarizeEvent::ModelReady`] arrives exactly once, after the `MLModel` load —
+    /// cold, the ~105 s ANE program compile, and not interruptible — and before any
+    /// audio is read. [`DiarizeEvent::Progress`] then fires once per processed chunk,
+    /// roughly 11/s on `.all` and 3/s on `.cpuOnly`. The gap between the two covers
+    /// reading and resampling the whole file, so it grows with the audio while the load
+    /// ahead of it does not: budget them separately.
     ///
     /// Cancelling via `cancel` returns [`DiarizeOutcome::Cancelled`] rather than an
     /// error: the caller asked for it, so it is not a failure.
@@ -533,7 +536,7 @@ impl FluidAudio {
         model_path: Q,
         compute_units: DiarizeComputeUnits,
         cancel: Option<&DiarizeCancelToken>,
-        progress: Option<&mut (dyn FnMut(DiarizeProgress) + Send)>,
+        observer: Option<&mut (dyn FnMut(DiarizeEvent) + Send)>,
     ) -> Result<DiarizeOutcome, FluidAudioError> {
         let audio_str = audio.as_ref().to_string_lossy();
         if !audio.as_ref().exists() {
@@ -549,7 +552,7 @@ impl FluidAudio {
                 &model_str,
                 compute_units.as_str(),
                 cancel,
-                progress,
+                observer,
             )
             .map_err(FluidAudioError::from)
     }

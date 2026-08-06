@@ -178,8 +178,9 @@ extern "C" {
         model_path: *const i8,
         compute_units: *const i8,
         cancel_token: *mut std::ffi::c_void,
+        model_ready: Option<DiarizeModelReadyTrampoline>,
         progress: Option<DiarizeProgressTrampoline>,
-        progress_context: *mut std::ffi::c_void,
+        callback_context: *mut std::ffi::c_void,
         out_speaker_ids: *mut *mut *mut i8,
         out_start_times: *mut *mut f32,
         out_end_times: *mut *mut f32,
@@ -205,6 +206,9 @@ use std::ffi::{CStr, CString};
 pub type DiarizeProgressTrampoline =
     extern "C" fn(context: *mut std::ffi::c_void, processed: u64, total: u64, chunks: u32);
 
+/// Swift-facing shape of the one-shot model-ready callback.
+pub type DiarizeModelReadyTrampoline = extern "C" fn(context: *mut std::ffi::c_void);
+
 /// One diarization progress report: `processed_samples` of `total_samples` consumed
 /// after `chunks` model invocations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +216,17 @@ pub struct DiarizeProgress {
     pub processed_samples: u64,
     pub total_samples: u64,
     pub chunks: u32,
+}
+
+/// What a controlled diarization reports while it runs.
+///
+/// [`Self::ModelReady`] arrives exactly once and separates the two costs a caller
+/// cannot otherwise tell apart: the model load ahead of it is fixed (cold, the ~105 s
+/// ANE compile), the audio read, resample and chunking after it scale with the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiarizeEvent {
+    ModelReady,
+    Progress(DiarizeProgress),
 }
 
 /// Handle for stopping an in-flight [`FluidAudioBridge::diarize_file_with_models_controlled`].
@@ -262,18 +277,36 @@ extern "C" fn diarize_progress_trampoline(
     total: u64,
     chunks: u32,
 ) {
+    // SAFETY: see `deliver_diarize_event`.
+    unsafe {
+        deliver_diarize_event(
+            context,
+            DiarizeEvent::Progress(DiarizeProgress {
+                processed_samples: processed,
+                total_samples: total,
+                chunks,
+            }),
+        )
+    }
+}
+
+extern "C" fn diarize_model_ready_trampoline(context: *mut std::ffi::c_void) {
+    // SAFETY: see `deliver_diarize_event`.
+    unsafe { deliver_diarize_event(context, DiarizeEvent::ModelReady) }
+}
+
+/// # Safety
+///
+/// `context` must be the `&mut &mut dyn FnMut(DiarizeEvent)` parked on the caller's
+/// stack for the whole (synchronous) diarize call, or null. Swift invokes both
+/// trampolines from exactly one thread at a time — the model-ready marker fires before
+/// any chunk, and the diarizer holds its own lock across the chunk loop.
+unsafe fn deliver_diarize_event(context: *mut std::ffi::c_void, event: DiarizeEvent) {
     if context.is_null() {
         return;
     }
-    // SAFETY: `context` is the `&mut &mut dyn FnMut` parked on the caller's stack for
-    // the whole (synchronous) diarize call, and Swift invokes this from exactly one
-    // thread at a time — the diarizer holds its own lock across the chunk loop.
-    let callback = unsafe { &mut *(context as *mut &mut (dyn FnMut(DiarizeProgress) + Send)) };
-    callback(DiarizeProgress {
-        processed_samples: processed,
-        total_samples: total,
-        chunks,
-    });
+    let callback = unsafe { &mut *(context as *mut &mut (dyn FnMut(DiarizeEvent) + Send)) };
+    callback(event);
 }
 
 /// Outcome of a cancellable diarization.
@@ -463,14 +496,14 @@ impl FluidAudioBridge {
     }
 
     /// `diarize_file_with_models` plus progress, cancellation and compute-unit choice.
-    /// `progress` is called from the diarizer's thread while this one is parked.
+    /// `observer` is called from the diarizer's thread while this one is parked.
     pub fn diarize_file_with_models_controlled(
         &self,
         audio_path: &str,
         model_path: &str,
         compute_units: &str,
         cancel: Option<&DiarizeCancelToken>,
-        progress: Option<&mut (dyn FnMut(DiarizeProgress) + Send)>,
+        observer: Option<&mut (dyn FnMut(DiarizeEvent) + Send)>,
     ) -> Result<DiarizeOutcome, String> {
         let c_audio = CString::new(audio_path).map_err(|_| "Invalid audio path")?;
         let c_model = CString::new(model_path).map_err(|_| "Invalid model path")?;
@@ -482,13 +515,14 @@ impl FluidAudioBridge {
         let mut quality_scores_ptr: *mut f32 = std::ptr::null_mut();
         let mut count: u32 = 0;
 
-        let mut callback = progress;
-        let (trampoline, context) = match callback.as_mut() {
+        let mut callback = observer;
+        let (ready, progress, context) = match callback.as_mut() {
             Some(cb) => (
+                Some(diarize_model_ready_trampoline as DiarizeModelReadyTrampoline),
                 Some(diarize_progress_trampoline as DiarizeProgressTrampoline),
-                cb as *mut &mut (dyn FnMut(DiarizeProgress) + Send) as *mut std::ffi::c_void,
+                cb as *mut &mut (dyn FnMut(DiarizeEvent) + Send) as *mut std::ffi::c_void,
             ),
-            None => (None, std::ptr::null_mut()),
+            None => (None, None, std::ptr::null_mut()),
         };
 
         let result = unsafe {
@@ -498,7 +532,8 @@ impl FluidAudioBridge {
                 c_model.as_ptr(),
                 c_units.as_ptr(),
                 cancel.map_or(std::ptr::null_mut(), DiarizeCancelToken::as_ptr),
-                trampoline,
+                ready,
+                progress,
                 context,
                 &mut speaker_ids_ptr,
                 &mut start_times_ptr,

@@ -10,10 +10,15 @@
 //! Tests that require network downloads or compiled CoreML models are guarded
 //! with `#[ignore]` and can be run via:
 //!     cargo test --test ffi_bindings -- --ignored
+//!
+//! The diarization tests are *not* ignored: they need no download, only a staged
+//! Sortformer package named by `FLUIDAUDIO_TEST_DIARIZE_MODEL` /
+//! `FLUIDAUDIO_TEST_DIARIZE_AUDIO`, and skip themselves when it is absent — so a
+//! machine that has one runs them by default rather than only on request.
 
 use fluidaudio_rs::{
-    DiarizeCancelToken, DiarizeComputeUnits, DiarizeOutcome, DiarizeProgress, FluidAudio,
-    FluidAudioError, KokoroComputeUnits,
+    DiarizeCancelToken, DiarizeComputeUnits, DiarizeEvent, DiarizeOutcome, DiarizeProgress,
+    FluidAudio, FluidAudioError, KokoroComputeUnits,
 };
 
 /// The bridge can be created and dropped without panicking. Drop must not
@@ -431,7 +436,6 @@ fn controlled_diarize_returns_file_not_found() {
 /// Runs against the caller's staged Sortformer package via
 /// `FLUIDAUDIO_TEST_DIARIZE_MODEL`; without it there is nothing to diarize.
 #[test]
-#[ignore]
 fn diarize_honours_a_cancel_requested_before_the_call() {
     let (audio_path, model_path) = match diarize_test_inputs() {
         Some(paths) => paths,
@@ -453,9 +457,45 @@ fn diarize_honours_a_cancel_requested_before_the_call() {
     assert!(matches!(outcome, DiarizeOutcome::Cancelled));
 }
 
+/// The model-ready marker fires exactly once, before any chunk: that ordering is what
+/// lets a caller bound the model load and the audio processing separately.
+#[test]
+fn diarize_signals_model_ready_before_the_first_chunk() {
+    let (audio_path, model_path) = match diarize_test_inputs() {
+        Some(paths) => paths,
+        None => return,
+    };
+    let audio = FluidAudio::new().expect("bridge");
+    let mut events: Vec<DiarizeEvent> = Vec::new();
+    let mut record = |e: DiarizeEvent| events.push(e);
+
+    let outcome = audio
+        .diarize_file_with_models_controlled(
+            &audio_path,
+            &model_path,
+            DiarizeComputeUnits::All,
+            None,
+            Some(&mut record),
+        )
+        .expect("diarize");
+
+    assert!(matches!(outcome, DiarizeOutcome::Completed(_)));
+    let ready_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, DiarizeEvent::ModelReady))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        ready_positions,
+        vec![0],
+        "ModelReady must arrive exactly once and first, got {} events",
+        events.len()
+    );
+}
+
 /// Progress fires per chunk and advances monotonically to the full sample count.
 #[test]
-#[ignore]
 fn diarize_reports_monotonic_progress() {
     let (audio_path, model_path) = match diarize_test_inputs() {
         Some(paths) => paths,
@@ -463,7 +503,11 @@ fn diarize_reports_monotonic_progress() {
     };
     let audio = FluidAudio::new().expect("bridge");
     let mut ticks: Vec<DiarizeProgress> = Vec::new();
-    let mut record = |p: DiarizeProgress| ticks.push(p);
+    let mut record = |e: DiarizeEvent| {
+        if let DiarizeEvent::Progress(p) = e {
+            ticks.push(p);
+        }
+    };
 
     let outcome = audio
         .diarize_file_with_models_controlled(
@@ -496,7 +540,6 @@ fn diarize_reports_monotonic_progress() {
 
 /// Cancelling mid-run stops within a chunk instead of running to completion.
 #[test]
-#[ignore]
 fn diarize_cancels_mid_run() {
     let (audio_path, model_path) = match diarize_test_inputs() {
         Some(paths) => paths,
@@ -505,9 +548,11 @@ fn diarize_cancels_mid_run() {
     let audio = FluidAudio::new().expect("bridge");
     let token = std::sync::Arc::new(DiarizeCancelToken::new());
     let trip = std::sync::Arc::clone(&token);
-    let mut on_progress = move |p: DiarizeProgress| {
-        if p.chunks >= 3 {
-            trip.cancel();
+    let mut on_event = move |e: DiarizeEvent| {
+        if let DiarizeEvent::Progress(p) = e {
+            if p.chunks >= 3 {
+                trip.cancel();
+            }
         }
     };
 
@@ -517,7 +562,7 @@ fn diarize_cancels_mid_run() {
             &model_path,
             DiarizeComputeUnits::All,
             Some(&token),
-            Some(&mut on_progress),
+            Some(&mut on_event),
         )
         .expect("a cancelled diarize is not an error");
     assert!(matches!(outcome, DiarizeOutcome::Cancelled));

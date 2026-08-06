@@ -139,11 +139,15 @@ public func fluidaudio_diarize_file_with_models(
 
 /// As above, but with progress reporting, cancellation and compute-unit selection.
 ///
-/// A separate C symbol so the original's arity stays untouched. `progress` is invoked
-/// on the diarizer's own thread once per processed chunk with
-/// `(context, processedSamples, totalSamples, chunksProcessed)`; the whole call is
-/// synchronous, so the caller's thread is parked for its duration and the callback must
-/// be safe to run from another thread. Returns 0 on success, -2 if cancelled, -1 otherwise.
+/// A separate C symbol so the original's arity stays untouched. Both callbacks fire on
+/// the diarizer's own thread while the caller's is parked in this synchronous call, so
+/// they must be safe to run from another thread, and both receive `callbackContext`.
+/// `modelReady` fires exactly once, when the `MLModel` is loaded and the diarizer
+/// initialised but before a single audio sample has been read — everything after it is
+/// audio work, which is what lets a caller bound the load and the processing separately.
+/// `progress` fires once per processed chunk with
+/// `(context, processedSamples, totalSamples, chunksProcessed)`.
+/// Returns 0 on success, -2 if cancelled, -1 otherwise.
 @_cdecl("fluidaudio_diarize_file_with_models_controlled")
 public func fluidaudio_diarize_file_with_models_controlled(
     _ ptr: UnsafeMutableRawPointer?,
@@ -151,8 +155,9 @@ public func fluidaudio_diarize_file_with_models_controlled(
     _ modelPath: UnsafePointer<CChar>?,
     _ computeUnits: UnsafePointer<CChar>?,
     _ cancelToken: UnsafeMutableRawPointer?,
+    _ modelReady: (@convention(c) (UnsafeMutableRawPointer?) -> Void)?,
     _ progress: (@convention(c) (UnsafeMutableRawPointer?, UInt64, UInt64, UInt32) -> Void)?,
-    _ progressContext: UnsafeMutableRawPointer?,
+    _ callbackContext: UnsafeMutableRawPointer?,
     _ outSpeakerIds: UnsafeMutablePointer<UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?>?,
     _ outStartTimes: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
     _ outEndTimes: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
@@ -168,9 +173,10 @@ public func fluidaudio_diarize_file_with_models_controlled(
 
     let callback: SortformerDiarizer.ProgressCallback? = progress.map { emit in
         { processed, total, chunks in
-            emit(progressContext, UInt64(max(0, processed)), UInt64(max(0, total)), UInt32(max(0, chunks)))
+            emit(callbackContext, UInt64(max(0, processed)), UInt64(max(0, total)), UInt32(max(0, chunks)))
         }
     }
+    let ready: (() -> Void)? = modelReady.map { emit in { emit(callbackContext) } }
 
     do {
         let segments = try bridge.diarizeFileWithModels(
@@ -178,6 +184,7 @@ public func fluidaudio_diarize_file_with_models_controlled(
             modelPath: String(cString: modelPath),
             computeUnits: units,
             cancelToken: token,
+            onModelReady: ready,
             progress: callback
         )
         emitDiarizationSegments(
