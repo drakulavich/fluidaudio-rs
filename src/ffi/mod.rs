@@ -1,6 +1,7 @@
 pub mod bridge;
 
 pub use bridge::{
-    AsrResult, DiarizationSegment, DiarizeCancelToken, DiarizeEvent, DiarizeOutcome,
-    DiarizeProgress, FluidAudioBridge, SystemInfo, VadFrame,
+    offline_mode, set_offline_mode, AsrResult, DiarizationSegment, DiarizeCancelToken,
+    DiarizeEvent, DiarizeOutcome, DiarizeProgress, FluidAudioBridge, KokoroError, KokoroFailure,
+    SystemInfo, VadFrame,
 };

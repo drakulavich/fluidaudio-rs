@@ -14,6 +14,36 @@ private func kokoroLog(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// Failure codes these entry points return. Kept distinct from a blanket `-1`
+/// because a caller cannot act on the three the same way: a missing asset under
+/// offline mode is fixed by staging it, an uninitialized engine is a call-order
+/// bug, and everything else is diagnosable only from the stderr line.
+enum KokoroStatus {
+    static let ok: Int32 = 0
+    static let failed: Int32 = -1
+    static let notInitialized: Int32 = -2
+    /// `ModelHub.offlineMode` blocked a fetch, or a required model was absent
+    /// from the local cache while offline.
+    static let assetsUnavailable: Int32 = -3
+}
+
+/// Log `error` and map it onto a `KokoroStatus`.
+private func kokoroFailure(_ context: String, _ error: Error) -> Int32 {
+    kokoroLog("\(context): \(error)")
+    if let download = error as? DownloadError {
+        switch download {
+        case .networkDisabled, .modelMissing:
+            return KokoroStatus.assetsUnavailable
+        default:
+            return KokoroStatus.failed
+        }
+    }
+    if case BridgeError.notInitialized = error {
+        return KokoroStatus.notInitialized
+    }
+    return KokoroStatus.failed
+}
+
 /// Shared body of both init entry points. `computeUnits` is the kebab-case preset
 /// name `TtsComputeUnitPreset(cliValue:)` accepts (`default`, `all-ane`,
 /// `cpu-and-gpu`, `cpu-only`). NULL or empty keeps the backend's empirical
@@ -25,7 +55,7 @@ private func initializeKokoro(
     _ lang: UnsafePointer<CChar>?,
     _ computeUnits: UnsafePointer<CChar>?
 ) -> Int32 {
-    guard let ptr = ptr else { return -1 }
+    guard let ptr = ptr else { return KokoroStatus.failed }
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
     let voice = defaultVoice.map { String(cString: $0) } ?? "af_heart"
     let langString = lang.map { String(cString: $0) } ?? ""
@@ -40,15 +70,14 @@ private func initializeKokoro(
         kokoroLog(
             "Kokoro init error: unknown compute-units preset '\(unitsString)' "
                 + "(expected one of: \(TtsComputeUnitPreset.allCases.map(\.cliValue).joined(separator: ", ")))")
-        return -1
+        return KokoroStatus.failed
     }
 
     do {
         try bridge.initializeKokoro(defaultVoice: voice, lang: langString, computeUnits: preset)
-        return 0
+        return KokoroStatus.ok
     } catch {
-        kokoroLog("Kokoro init error: \(error)")
-        return -1
+        return kokoroFailure("Kokoro init error", error)
     }
 }
 
@@ -92,7 +121,7 @@ public func fluidaudio_kokoro_synthesize(
     // Both output pointers are required: without them the caller can neither
     // receive the buffer nor its length, and allocating anyway would leak.
     guard let ptr = ptr, let text = text, let outBytes = outBytes, let outLen = outLen else {
-        return -1
+        return KokoroStatus.failed
     }
     outBytes.pointee = nil
     outLen.pointee = 0
@@ -106,10 +135,9 @@ public func fluidaudio_kokoro_synthesize(
         data.copyBytes(to: buf, count: count)
         outBytes.pointee = buf
         outLen.pointee = UInt(count)
-        return 0
+        return KokoroStatus.ok
     } catch {
-        kokoroLog("Kokoro synthesize error: \(error)")
-        return -1
+        return kokoroFailure("Kokoro synthesize error", error)
     }
 }
 
@@ -127,20 +155,20 @@ public func fluidaudio_kokoro_set_english_lexicon(
     _ phonemes: UnsafePointer<UnsafePointer<CChar>?>?,
     _ count: UInt
 ) -> Int32 {
-    guard let ptr = ptr else { return -1 }
+    guard let ptr = ptr else { return KokoroStatus.failed }
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
 
     var entries: [String: String] = [:]
     if count > 0 {
         guard let words = words, let phonemes = phonemes else {
             kokoroLog("Kokoro lexicon error: \(count) entries requested with a NULL array")
-            return -1
+            return KokoroStatus.failed
         }
         entries.reserveCapacity(Int(count))
         for index in 0..<Int(count) {
             guard let word = words[index], let ipa = phonemes[index] else {
                 kokoroLog("Kokoro lexicon error: NULL string at index \(index)")
-                return -1
+                return KokoroStatus.failed
             }
             entries[String(cString: word)] = String(cString: ipa)
         }
@@ -148,10 +176,9 @@ public func fluidaudio_kokoro_set_english_lexicon(
 
     do {
         try bridge.setKokoroEnglishLexicon(entries)
-        return 0
+        return KokoroStatus.ok
     } catch {
-        kokoroLog("Kokoro lexicon error: \(error)")
-        return -1
+        return kokoroFailure("Kokoro lexicon error", error)
     }
 }
 

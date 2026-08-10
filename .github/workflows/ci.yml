@@ -42,5 +42,10 @@ jobs:
       - name: Run FFI integration tests
         run: cargo test --test ffi_bindings
 
+      # Separate binary: the offline flag is process-global, so these must not
+      # share a process with the download-dependent tests above.
+      - name: Run offline-mode tests
+        run: cargo test --test offline_mode
+
       - name: Run library unit tests
         run: cargo test --lib

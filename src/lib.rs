@@ -58,6 +58,13 @@ pub enum FluidAudioError {
     #[error("Audio file not found: {0}")]
     FileNotFound(String),
 
+    /// A model asset was absent and [`set_offline_mode`] blocked fetching it.
+    /// Distinct from [`Self::FileNotFound`], which is about the caller's own
+    /// audio input: this one is fixed by staging the asset, not by pointing
+    /// somewhere else.
+    #[error("Model assets unavailable while offline: {0}")]
+    AssetsUnavailable(String),
+
     #[error("Swift bridge error: {0}")]
     BridgeError(String),
 }
@@ -66,6 +73,42 @@ impl From<String> for FluidAudioError {
     fn from(s: String) -> Self {
         FluidAudioError::BridgeError(s)
     }
+}
+
+impl From<ffi::KokoroError> for FluidAudioError {
+    fn from(e: ffi::KokoroError) -> Self {
+        match e.failure {
+            ffi::KokoroFailure::NotInitialized => FluidAudioError::NotInitialized(e.message),
+            ffi::KokoroFailure::AssetsUnavailable => FluidAudioError::AssetsUnavailable(e.message),
+            ffi::KokoroFailure::Failed => FluidAudioError::BridgeError(e.message),
+        }
+    }
+}
+
+/// Turn FluidAudio's offline-only enforcement on or off, process-wide.
+///
+/// With it on, `ModelHub.download`, `fetchFile`, `fetchWithAuth`, the HF tree
+/// walk and `loadModels`' retry-with-redownload fallback all fail instead of
+/// reaching HuggingFace; a Kokoro call that needed one of them comes back as
+/// [`FluidAudioError::AssetsUnavailable`]. Upstream reads the flag per request,
+/// so set it before touching any loader — flipping it mid-download only stops
+/// the next one.
+///
+/// # What it does not cover
+///
+/// At FluidAudio 0.15.5 `AssetDownloader` uses the shared session directly and
+/// consults no flag, so these KokoroAne helpers still reach the network with
+/// offline mode on: `ensureVoicePack`, `ensureEnglishLexicon`,
+/// `ensureMandarinG2P`, `ensureMandarinJiebaHmm`, `ensureMandarinG2pw`. An
+/// application that must never fetch has to pre-stage those files; this flag
+/// closes the repo-download paths, not every path.
+pub fn set_offline_mode(enabled: bool) {
+    ffi::set_offline_mode(enabled)
+}
+
+/// Current state of the process-global offline flag.
+pub fn offline_mode() -> bool {
+    ffi::offline_mode()
 }
 
 /// CoreML compute-unit preset for the Kokoro TTS pipeline.

@@ -423,7 +423,7 @@ fn english_lexicon_without_kokoro_is_an_error() {
         .set_kokoro_english_lexicon(&[("JSON", "ˈdʒeɪsən")])
         .expect_err("lexicon before init must fail");
     assert!(
-        matches!(err, FluidAudioError::BridgeError(_)),
+        matches!(err, FluidAudioError::NotInitialized(_)),
         "unexpected error variant: {err:?}"
     );
 }

@@ -5,6 +5,10 @@
 // Raw FFI functions - called directly from Rust, implemented in Swift
 #[link(name = "FluidAudioBridge")]
 extern "C" {
+    // Offline enforcement (process-global; upstream's flag is a static)
+    fn fluidaudio_set_offline_mode(enabled: i32);
+    fn fluidaudio_offline_mode() -> i32;
+
     // Constructor / Destructor
     fn fluidaudio_bridge_create() -> *mut std::ffi::c_void;
     fn fluidaudio_bridge_create_with_models_dir(dir: *const i8) -> *mut std::ffi::c_void;
@@ -322,6 +326,68 @@ pub enum DiarizeOutcome {
     Cancelled,
 }
 
+/// Turn FluidAudio's offline-only enforcement on or off. Process-global —
+/// upstream's `ModelHub.offlineMode` is a static, and it is read per request,
+/// so this must be set before any loader is touched.
+pub fn set_offline_mode(enabled: bool) {
+    unsafe { fluidaudio_set_offline_mode(i32::from(enabled)) }
+}
+
+/// Current state of the process-global offline flag.
+pub fn offline_mode() -> bool {
+    unsafe { fluidaudio_offline_mode() != 0 }
+}
+
+/// Why a Kokoro entry point failed. The Swift side returns a status code
+/// (`KokoroStatus`) rather than a message, so this is the whole of what
+/// crosses the boundary; the detail is on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KokoroFailure {
+    /// The engine was not initialized (call `initialize_kokoro` first).
+    NotInitialized,
+    /// A model asset was missing and offline mode blocked fetching it.
+    AssetsUnavailable,
+    /// Anything else; see the `Kokoro …: <error>` line on stderr.
+    Failed,
+}
+
+impl KokoroFailure {
+    fn from_status(status: i32) -> Self {
+        match status {
+            -2 => Self::NotInitialized,
+            -3 => Self::AssetsUnavailable,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// A failed Kokoro call: the classified reason plus the operation that hit it.
+#[derive(Debug, Clone)]
+pub struct KokoroError {
+    pub failure: KokoroFailure,
+    pub message: String,
+}
+
+impl KokoroError {
+    fn new(status: i32, operation: &str) -> Self {
+        let failure = KokoroFailure::from_status(status);
+        let message = match failure {
+            KokoroFailure::NotInitialized => format!("{operation}: Kokoro is not initialized"),
+            KokoroFailure::AssetsUnavailable => {
+                format!("{operation}: model assets are missing and downloads are disabled")
+            }
+            KokoroFailure::Failed => format!("{operation} failed"),
+        };
+        Self { failure, message }
+    }
+
+    fn detailed(status: i32, operation: &str, detail: String) -> Self {
+        let mut err = Self::new(status, operation);
+        err.message = format!("{}: {detail}", err.message);
+        err
+    }
+}
+
 /// Safe wrapper for the FluidAudio bridge
 pub struct FluidAudioBridge {
     ptr: *mut std::ffi::c_void,
@@ -361,15 +427,16 @@ impl FluidAudioBridge {
         }
     }
 
-    pub fn initialize_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), String> {
-        let c_voice = CString::new(default_voice).map_err(|_| "Invalid voice")?;
-        let c_lang = CString::new(lang).map_err(|_| "Invalid lang")?;
+    pub fn initialize_kokoro(&self, default_voice: &str, lang: &str) -> Result<(), KokoroError> {
+        let invalid = |what: &str| KokoroError::detailed(-1, "initialize Kokoro", what.to_string());
+        let c_voice = CString::new(default_voice).map_err(|_| invalid("invalid voice"))?;
+        let c_lang = CString::new(lang).map_err(|_| invalid("invalid lang"))?;
         let result =
             unsafe { fluidaudio_initialize_kokoro(self.ptr, c_voice.as_ptr(), c_lang.as_ptr()) };
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to initialize Kokoro".to_string())
+            Err(KokoroError::new(result, "initialize Kokoro"))
         }
     }
 
@@ -378,10 +445,11 @@ impl FluidAudioBridge {
         default_voice: &str,
         lang: &str,
         compute_units: &str,
-    ) -> Result<(), String> {
-        let c_voice = CString::new(default_voice).map_err(|_| "Invalid voice")?;
-        let c_lang = CString::new(lang).map_err(|_| "Invalid lang")?;
-        let c_units = CString::new(compute_units).map_err(|_| "Invalid compute units")?;
+    ) -> Result<(), KokoroError> {
+        let invalid = |what: &str| KokoroError::detailed(-1, "initialize Kokoro", what.to_string());
+        let c_voice = CString::new(default_voice).map_err(|_| invalid("invalid voice"))?;
+        let c_lang = CString::new(lang).map_err(|_| invalid("invalid lang"))?;
+        let c_units = CString::new(compute_units).map_err(|_| invalid("invalid compute units"))?;
         let result = unsafe {
             fluidaudio_initialize_kokoro_with_compute_units(
                 self.ptr,
@@ -393,8 +461,10 @@ impl FluidAudioBridge {
         if result == 0 {
             Ok(())
         } else {
-            Err(format!(
-                "Failed to initialize Kokoro (compute units: {compute_units})"
+            Err(KokoroError::detailed(
+                result,
+                "initialize Kokoro",
+                format!("compute units: {compute_units}"),
             ))
         }
     }
@@ -406,9 +476,10 @@ impl FluidAudioBridge {
         text: &str,
         voice: &str,
         speed: f32,
-    ) -> Result<Vec<u8>, String> {
-        let c_text = CString::new(text).map_err(|_| "Invalid text")?;
-        let c_voice = CString::new(voice).map_err(|_| "Invalid voice")?;
+    ) -> Result<Vec<u8>, KokoroError> {
+        let invalid = |what: &str| KokoroError::detailed(-1, "synthesize", what.to_string());
+        let c_text = CString::new(text).map_err(|_| invalid("invalid text"))?;
+        let c_voice = CString::new(voice).map_err(|_| invalid("invalid voice"))?;
         let mut out_bytes: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 0;
 
@@ -424,14 +495,18 @@ impl FluidAudioBridge {
         };
 
         if result != 0 {
-            return Err("Kokoro synthesis failed".to_string());
+            return Err(KokoroError::new(result, "synthesize"));
         }
         if out_bytes.is_null() || out_len == 0 {
             // On a success return Swift may still have handed us a (possibly
             // zero-length) allocation; free it (null-safe) so the empty-audio
             // path can't leak.
             unsafe { fluidaudio_kokoro_free_bytes(out_bytes) };
-            return Err("Kokoro returned no audio".to_string());
+            return Err(KokoroError::detailed(
+                -1,
+                "synthesize",
+                "no audio".to_string(),
+            ));
         }
 
         // SAFETY: the Swift side allocated `out_len` bytes at `out_bytes`; copy
@@ -447,13 +522,15 @@ impl FluidAudioBridge {
 
     /// Install (or clear) English pronunciation overrides on the initialized
     /// Kokoro engine. An empty slice clears the table.
-    pub fn set_kokoro_english_lexicon(&self, entries: &[(&str, &str)]) -> Result<(), String> {
+    pub fn set_kokoro_english_lexicon(&self, entries: &[(&str, &str)]) -> Result<(), KokoroError> {
+        let invalid = |what: String| KokoroError::detailed(-1, "set the English lexicon", what);
         let mut words = Vec::with_capacity(entries.len());
         let mut phonemes = Vec::with_capacity(entries.len());
         for (word, ipa) in entries {
-            words.push(CString::new(*word).map_err(|_| format!("Invalid lexicon word '{word}'"))?);
+            words.push(CString::new(*word).map_err(|_| invalid(format!("invalid word '{word}'")))?);
             phonemes.push(
-                CString::new(*ipa).map_err(|_| format!("Invalid lexicon phonemes for '{word}'"))?,
+                CString::new(*ipa)
+                    .map_err(|_| invalid(format!("invalid phonemes for '{word}'")))?,
             );
         }
         let word_ptrs: Vec<*const i8> = words.iter().map(|s| s.as_ptr()).collect();
@@ -472,7 +549,7 @@ impl FluidAudioBridge {
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to set the Kokoro English lexicon".to_string())
+            Err(KokoroError::new(result, "set the English lexicon"))
         }
     }
 
