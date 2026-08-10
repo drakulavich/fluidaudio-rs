@@ -113,6 +113,48 @@ public func fluidaudio_kokoro_synthesize(
     }
 }
 
+/// Install (or clear) English pronunciation overrides on an initialized Kokoro
+/// engine. `words` and `phonemes` are parallel arrays of `count` NUL-terminated
+/// UTF-8 strings (word → Misaki-style IPA); Swift copies them, so the caller may
+/// free them as soon as this returns. `count == 0` clears the table and ignores
+/// both array pointers. Fails when Kokoro has not been initialized — the table
+/// lives on the manager, so a silent no-op would leave the caller believing its
+/// pronunciations were installed.
+@_cdecl("fluidaudio_kokoro_set_english_lexicon")
+public func fluidaudio_kokoro_set_english_lexicon(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ words: UnsafePointer<UnsafePointer<CChar>?>?,
+    _ phonemes: UnsafePointer<UnsafePointer<CChar>?>?,
+    _ count: UInt
+) -> Int32 {
+    guard let ptr = ptr else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+
+    var entries: [String: String] = [:]
+    if count > 0 {
+        guard let words = words, let phonemes = phonemes else {
+            kokoroLog("Kokoro lexicon error: \(count) entries requested with a NULL array")
+            return -1
+        }
+        entries.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            guard let word = words[index], let ipa = phonemes[index] else {
+                kokoroLog("Kokoro lexicon error: NULL string at index \(index)")
+                return -1
+            }
+            entries[String(cString: word)] = String(cString: ipa)
+        }
+    }
+
+    do {
+        try bridge.setKokoroEnglishLexicon(entries)
+        return 0
+    } catch {
+        kokoroLog("Kokoro lexicon error: \(error)")
+        return -1
+    }
+}
+
 @_cdecl("fluidaudio_kokoro_free_bytes")
 public func fluidaudio_kokoro_free_bytes(_ p: UnsafeMutablePointer<UInt8>?) {
     p?.deallocate()

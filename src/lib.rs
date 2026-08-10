@@ -680,6 +680,28 @@ impl FluidAudio {
         self.bridge.is_kokoro_available()
     }
 
+    /// Install (or clear) caller-supplied English pronunciation overrides —
+    /// FluidAudio's `KokoroAneManager.setEnglishCustomLexicon(_:)`.
+    ///
+    /// Entries are `(word, IPA)` pairs, e.g. `("JSON", "ˈdʒeɪsən")`. The IPA is
+    /// forwarded verbatim into the phoneme string and encoded character by
+    /// character against the chain's `vocab.json`, so anything outside that
+    /// vocab is silently dropped. Resolution puts these first: exact spelling,
+    /// then the lower-cased form, then FluidAudio's bundled Misaki lexicon,
+    /// then its BART G2P fallback. An empty slice clears the table.
+    ///
+    /// Call after [`init_kokoro`](Self::init_kokoro) — the table lives on the
+    /// manager, and this errors rather than no-op when none exists yet. Only
+    /// the English KokoroAne variant reads it; Mandarin has its own hook.
+    pub fn set_kokoro_english_lexicon(
+        &self,
+        entries: &[(&str, &str)],
+    ) -> Result<(), FluidAudioError> {
+        self.bridge
+            .set_kokoro_english_lexicon(entries)
+            .map_err(FluidAudioError::from)
+    }
+
     // ========== System Info ==========
 
     /// Get system information

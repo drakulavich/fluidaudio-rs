@@ -159,6 +159,12 @@ extern "C" {
     ) -> i32;
     fn fluidaudio_kokoro_free_bytes(p: *mut u8);
     fn fluidaudio_is_kokoro_available(bridge: *mut std::ffi::c_void) -> i32;
+    fn fluidaudio_kokoro_set_english_lexicon(
+        bridge: *mut std::ffi::c_void,
+        words: *const *const i8,
+        phonemes: *const *const i8,
+        count: usize,
+    ) -> i32;
 
     // Model-path diarization (loads from a pre-staged .mlpackage, no download)
     fn fluidaudio_diarize_file_with_models(
@@ -437,6 +443,37 @@ impl FluidAudioBridge {
 
     pub fn is_kokoro_available(&self) -> bool {
         unsafe { fluidaudio_is_kokoro_available(self.ptr) != 0 }
+    }
+
+    /// Install (or clear) English pronunciation overrides on the initialized
+    /// Kokoro engine. An empty slice clears the table.
+    pub fn set_kokoro_english_lexicon(&self, entries: &[(&str, &str)]) -> Result<(), String> {
+        let mut words = Vec::with_capacity(entries.len());
+        let mut phonemes = Vec::with_capacity(entries.len());
+        for (word, ipa) in entries {
+            words.push(CString::new(*word).map_err(|_| format!("Invalid lexicon word '{word}'"))?);
+            phonemes.push(
+                CString::new(*ipa).map_err(|_| format!("Invalid lexicon phonemes for '{word}'"))?,
+            );
+        }
+        let word_ptrs: Vec<*const i8> = words.iter().map(|s| s.as_ptr()).collect();
+        let phoneme_ptrs: Vec<*const i8> = phonemes.iter().map(|s| s.as_ptr()).collect();
+
+        // SAFETY: both arrays hold `entries.len()` live pointers into `words` /
+        // `phonemes`, which outlive the call; Swift copies the strings.
+        let result = unsafe {
+            fluidaudio_kokoro_set_english_lexicon(
+                self.ptr,
+                word_ptrs.as_ptr(),
+                phoneme_ptrs.as_ptr(),
+                entries.len(),
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err("Failed to set the Kokoro English lexicon".to_string())
+        }
     }
 
     /// Pre-compile the diarization `.mlpackage` to its stable `.mlmodelc` sibling

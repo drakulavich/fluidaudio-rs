@@ -249,6 +249,26 @@ class FluidAudioBridgeInternal {
         return kokoroManager != nil
     }
 
+    /// Install (or clear) caller-supplied English pronunciation overrides.
+    ///
+    /// Entries map a word to a Misaki-style IPA string. FluidAudio checks them
+    /// ahead of its bundled Misaki lexicon and the BART G2P fallback, exact
+    /// spelling first then lower-cased. The manager owns the table, so this
+    /// must run after `initializeKokoro`; it re-applies on every call because
+    /// the manager drops its cached phonemizer when the table changes.
+    func setKokoroEnglishLexicon(_ entries: [String: String]) throws {
+        guard let manager = kokoroManager else {
+            throw BridgeError.notInitialized
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            await manager.setEnglishCustomLexicon(entries)
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+
     func initializeVad(_ threshold: Float) throws {
         let semaphore = DispatchSemaphore(value: 0)
         var initError: Error?

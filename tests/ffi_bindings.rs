@@ -413,6 +413,49 @@ fn kokoro_synthesises_without_the_neural_engine() {
     );
 }
 
+/// The English lexicon lives on the Kokoro manager, so installing one before
+/// `init_kokoro` must fail rather than quietly drop the caller's pronunciations.
+/// Needs no models — the guard runs before any Swift model work.
+#[test]
+fn english_lexicon_without_kokoro_is_an_error() {
+    let audio = FluidAudio::new().expect("bridge creation");
+    let err = audio
+        .set_kokoro_english_lexicon(&[("JSON", "ˈdʒeɪsən")])
+        .expect_err("lexicon before init must fail");
+    assert!(
+        matches!(err, FluidAudioError::BridgeError(_)),
+        "unexpected error variant: {err:?}"
+    );
+}
+
+/// A custom pronunciation reaches the synthesizer: the same word renders
+/// differently once its IPA is overridden. Runs on CPU+GPU so it works where no
+/// ANE is exposed; downloads ~200 MB if Kokoro was never fetched.
+#[test]
+#[ignore]
+fn english_lexicon_changes_the_synthesized_audio() {
+    let audio = FluidAudio::new().expect("bridge");
+    audio
+        .init_kokoro_with_compute_units("af_heart", "en-us", KokoroComputeUnits::CpuAndGpu)
+        .expect("kokoro init on cpu+gpu");
+
+    let plain = audio
+        .synthesize_kokoro("JSON", "af_heart", 1.0)
+        .expect("synthesis without an override");
+
+    audio
+        .set_kokoro_english_lexicon(&[("JSON", "ˈdʒeɪsən")])
+        .expect("install the override");
+    let overridden = audio
+        .synthesize_kokoro("JSON", "af_heart", 1.0)
+        .expect("synthesis with an override");
+
+    assert_ne!(
+        plain, overridden,
+        "the custom lexicon did not reach the English G2P"
+    );
+}
+
 /// The controlled diarize entry point validates paths on the Rust side, like the
 /// plain one, so a bad path never reaches Swift.
 #[test]
