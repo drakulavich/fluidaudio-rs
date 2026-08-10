@@ -6,7 +6,9 @@
 
 use std::sync::Mutex;
 
-use fluidaudio_rs::{offline_mode, set_offline_mode, FluidAudio, FluidAudioError};
+use fluidaudio_rs::{
+    model_registry_base_url, offline_mode, set_offline_mode, FluidAudio, FluidAudioError,
+};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -18,6 +20,47 @@ fn the_flag_round_trips() {
     assert!(offline_mode());
     set_offline_mode(false);
     assert!(!offline_mode());
+}
+
+/// The half of offline mode upstream's flag does not provide: `AssetDownloader`
+/// consults no flag, so the only thing that stops `ensureVoicePack` and the
+/// Mandarin aux probes is the registry they resolve against. Asserting the base
+/// moves off the network — and comes back — is how that is observable at all.
+#[test]
+fn offline_mode_moves_the_registry_off_the_network_and_back() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let online = model_registry_base_url();
+    assert!(
+        online.starts_with("http"),
+        "expected a fetchable registry, got {online:?}"
+    );
+
+    set_offline_mode(true);
+    let offline = model_registry_base_url();
+    set_offline_mode(false);
+
+    assert!(
+        !offline.starts_with("http"),
+        "offline registry must not be fetchable, got {offline:?}"
+    );
+    assert_eq!(
+        model_registry_base_url(),
+        online,
+        "turning offline mode off must restore the caller's registry"
+    );
+}
+
+/// Repeat calls must not lose the original registry — the naive shape captures
+/// the previous base on every enable, so a second `true` would capture the
+/// offline base and restore it forever.
+#[test]
+fn enabling_twice_still_restores_the_original_registry() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let online = model_registry_base_url();
+    set_offline_mode(true);
+    set_offline_mode(true);
+    set_offline_mode(false);
+    assert_eq!(model_registry_base_url(), online);
 }
 
 /// The whole chain under one assertion: with the flag on and a models root that

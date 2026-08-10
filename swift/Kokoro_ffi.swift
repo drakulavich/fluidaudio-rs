@@ -38,6 +38,21 @@ private func kokoroFailure(_ context: String, _ error: Error) -> Int32 {
             return KokoroStatus.failed
         }
     }
+    // The `AssetDownloader` helpers never raise `DownloadError`, so a missing
+    // voice pack or pinyin dictionary arrives as one of these instead. They mean
+    // the same thing to a caller — an asset is not there — and collapsing them
+    // into the generic failure would cost it the one message it can act on.
+    if let kokoro = error as? KokoroAneError {
+        switch kokoro {
+        case .downloadFailed, .voicePackMissing, .vocabMissing, .modelNotLoaded:
+            return KokoroStatus.assetsUnavailable
+        default:
+            return KokoroStatus.failed
+        }
+    }
+    if error is AssetDownloader.Error {
+        return KokoroStatus.assetsUnavailable
+    }
     if case BridgeError.notInitialized = error {
         return KokoroStatus.notInitialized
     }

@@ -94,14 +94,21 @@ impl From<ffi::KokoroError> for FluidAudioError {
 /// so set it before touching any loader — flipping it mid-download only stops
 /// the next one.
 ///
-/// # What it does not cover
+/// # Why this is two mechanisms
 ///
-/// At FluidAudio 0.15.5 `AssetDownloader` uses the shared session directly and
-/// consults no flag, so these KokoroAne helpers still reach the network with
-/// offline mode on: `ensureVoicePack`, `ensureEnglishLexicon`,
-/// `ensureMandarinG2P`, `ensureMandarinJiebaHmm`, `ensureMandarinG2pw`. An
-/// application that must never fetch has to pre-stage those files; this flag
-/// closes the repo-download paths, not every path.
+/// Upstream's flag alone leaves a hole: at FluidAudio 0.15.5 `AssetDownloader`
+/// uses the shared session and consults no flag, so `ensureVoicePack`,
+/// `ensureEnglishLexicon`, `ensureMandarinG2P`, `ensureMandarinJiebaHmm` and
+/// `ensureMandarinG2pw` would still reach the network. They all build their URLs
+/// through `ModelRegistry.resolveModel`, so this also repoints
+/// `ModelRegistry.baseURL` at an unresolvable scheme — see
+/// [`model_registry_base_url`] — which fails them locally and instantly. Each is
+/// best-effort upstream, so they degrade to dict-only Mandarin / BART-only
+/// English rather than erroring.
+///
+/// Enforcement is not a substitute for having the assets: an application still
+/// has to stage what it needs. This only guarantees that a gap surfaces as a
+/// failure instead of as a download.
 pub fn set_offline_mode(enabled: bool) {
     ffi::set_offline_mode(enabled)
 }
@@ -109,6 +116,13 @@ pub fn set_offline_mode(enabled: bool) {
 /// Current state of the process-global offline flag.
 pub fn offline_mode() -> bool {
     ffi::offline_mode()
+}
+
+/// The registry base every FluidAudio download URL is built from — HuggingFace
+/// unless a mirror was configured, and an unresolvable scheme while
+/// [`set_offline_mode`] is on.
+pub fn model_registry_base_url() -> String {
+    ffi::model_registry_base_url()
 }
 
 /// CoreML compute-unit preset for the Kokoro TTS pipeline.

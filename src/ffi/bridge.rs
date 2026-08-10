@@ -8,6 +8,7 @@ extern "C" {
     // Offline enforcement (process-global; upstream's flag is a static)
     fn fluidaudio_set_offline_mode(enabled: i32);
     fn fluidaudio_offline_mode() -> i32;
+    fn fluidaudio_model_registry_base_url() -> *mut i8;
 
     // Constructor / Destructor
     fn fluidaudio_bridge_create() -> *mut std::ffi::c_void;
@@ -336,6 +337,21 @@ pub fn set_offline_mode(enabled: bool) {
 /// Current state of the process-global offline flag.
 pub fn offline_mode() -> bool {
     unsafe { fluidaudio_offline_mode() != 0 }
+}
+
+/// The registry base every FluidAudio download URL is built from.
+pub fn model_registry_base_url() -> String {
+    // SAFETY: Swift hands back a `strdup`'d NUL-terminated string, or null on
+    // allocation failure; ownership transfers here and is released below.
+    unsafe {
+        let raw = fluidaudio_model_registry_base_url();
+        if raw.is_null() {
+            return String::new();
+        }
+        let owned = CStr::from_ptr(raw).to_string_lossy().into_owned();
+        fluidaudio_free_string(raw);
+        owned
+    }
 }
 
 /// Why a Kokoro entry point failed. The Swift side returns a status code
