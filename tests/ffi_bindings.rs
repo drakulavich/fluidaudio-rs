@@ -413,6 +413,62 @@ fn kokoro_synthesises_without_the_neural_engine() {
     );
 }
 
+/// Synthesizing before `init_kokoro` must come back classified, not as a blanket
+/// failure: a caller distinguishes a call-order bug from a missing asset by the
+/// variant alone (the detail only reaches stderr). Needs no models — the guard
+/// runs before any Swift model work.
+#[test]
+fn samples_synthesis_without_kokoro_is_classified_not_initialized() {
+    let audio = FluidAudio::new().expect("bridge creation");
+    let err = audio
+        .synthesize_kokoro_samples("Hello", "af_heart", 1.0)
+        .expect_err("synthesis before init must fail");
+    assert!(
+        matches!(err, FluidAudioError::NotInitialized(_)),
+        "unexpected error variant: {err:?}"
+    );
+}
+
+/// The reason this entry point exists: `synthesize_kokoro` hands back a WAV that
+/// `KokoroAneManager.wavData` peak-normalized to 0 dBFS for every variant but
+/// Japanese, and the scale factor is gone by then. The samples path must be the
+/// same audio *before* that slam — same duration, but not pinned to full scale.
+///
+/// Runs on CPU+GPU so it works where no ANE is exposed; downloads ~200 MB if
+/// Kokoro was never fetched.
+#[test]
+#[ignore]
+fn samples_synthesis_is_not_peak_normalized() {
+    let audio = FluidAudio::new().expect("bridge");
+    audio
+        .init_kokoro_with_compute_units("af_heart", "en-us", KokoroComputeUnits::CpuAndGpu)
+        .expect("kokoro init on cpu+gpu");
+
+    let (samples, sample_rate) = audio
+        .synthesize_kokoro_samples("The quick brown fox.", "af_heart", 1.0)
+        .expect("sample synthesis on cpu+gpu");
+    assert_eq!(sample_rate, 24_000);
+    assert!(!samples.is_empty(), "expected audio, got no samples");
+
+    let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+    assert!(
+        peak > 0.0 && (peak - 1.0).abs() > 1e-3,
+        "English samples peaked at {peak}, which is the 0 dBFS slam this path exists to avoid"
+    );
+
+    // Same synthesis, so the WAV must carry the same number of frames — that is
+    // what proves the two paths differ only in level.
+    let wav = audio
+        .synthesize_kokoro("The quick brown fox.", "af_heart", 1.0)
+        .expect("wav synthesis on cpu+gpu");
+    let wav_frames = (wav.len() - 44) / 2;
+    assert_eq!(
+        wav_frames,
+        samples.len(),
+        "sample and WAV paths disagree on length"
+    );
+}
+
 /// The English lexicon lives on the Kokoro manager, so installing one before
 /// `init_kokoro` must fail rather than quietly drop the caller's pronunciations.
 /// Needs no models — the guard runs before any Swift model work.

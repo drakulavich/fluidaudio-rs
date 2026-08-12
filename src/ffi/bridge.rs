@@ -163,6 +163,16 @@ extern "C" {
         out_len: *mut usize,
     ) -> i32;
     fn fluidaudio_kokoro_free_bytes(p: *mut u8);
+    fn fluidaudio_kokoro_synthesize_samples(
+        bridge: *mut std::ffi::c_void,
+        text: *const i8,
+        voice: *const i8,
+        speed: f32,
+        out_samples: *mut *mut f32,
+        out_count: *mut usize,
+        out_sample_rate: *mut u32,
+    ) -> i32;
+    fn fluidaudio_kokoro_free_samples(p: *mut f32);
     fn fluidaudio_is_kokoro_available(bridge: *mut std::ffi::c_void) -> i32;
     fn fluidaudio_kokoro_set_english_lexicon(
         bridge: *mut std::ffi::c_void,
@@ -530,6 +540,56 @@ impl FluidAudioBridge {
         let wav = unsafe { std::slice::from_raw_parts(out_bytes, out_len) }.to_vec();
         unsafe { fluidaudio_kokoro_free_bytes(out_bytes) };
         Ok(wav)
+    }
+
+    /// Synthesize `text` and return the chain's raw fp32 samples with their rate,
+    /// at the model's native level (no peak normalization).
+    pub fn kokoro_synthesize_samples(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<(Vec<f32>, u32), KokoroError> {
+        let invalid =
+            |what: &str| KokoroError::detailed(-1, "synthesize samples", what.to_string());
+        let c_text = CString::new(text).map_err(|_| invalid("invalid text"))?;
+        let c_voice = CString::new(voice).map_err(|_| invalid("invalid voice"))?;
+        let mut out_samples: *mut f32 = std::ptr::null_mut();
+        let mut out_count: usize = 0;
+        let mut out_sample_rate: u32 = 0;
+
+        let result = unsafe {
+            fluidaudio_kokoro_synthesize_samples(
+                self.ptr,
+                c_text.as_ptr(),
+                c_voice.as_ptr(),
+                speed,
+                &mut out_samples,
+                &mut out_count,
+                &mut out_sample_rate,
+            )
+        };
+
+        if result != 0 {
+            return Err(KokoroError::new(result, "synthesize samples"));
+        }
+        if out_samples.is_null() || out_count == 0 {
+            // On a success return Swift may still have handed us a (possibly
+            // zero-length) allocation; free it (null-safe) so the empty-audio
+            // path can't leak.
+            unsafe { fluidaudio_kokoro_free_samples(out_samples) };
+            return Err(KokoroError::detailed(
+                -1,
+                "synthesize samples",
+                "no audio".to_string(),
+            ));
+        }
+
+        // SAFETY: the Swift side allocated `out_count` floats at `out_samples`;
+        // copy them out, then hand the buffer back to Swift to free.
+        let samples = unsafe { std::slice::from_raw_parts(out_samples, out_count) }.to_vec();
+        unsafe { fluidaudio_kokoro_free_samples(out_samples) };
+        Ok((samples, out_sample_rate))
     }
 
     pub fn is_kokoro_available(&self) -> bool {

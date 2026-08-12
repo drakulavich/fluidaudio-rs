@@ -202,6 +202,61 @@ public func fluidaudio_kokoro_free_bytes(_ p: UnsafeMutablePointer<UInt8>?) {
     p?.deallocate()
 }
 
+/// Synthesize `text` with `voice` at `speed`; returns the chain's raw fp32
+/// samples via `outSamples`/`outCount` and their rate via `outSampleRate`.
+///
+/// Unlike `fluidaudio_kokoro_synthesize` these are at the model's native level:
+/// the WAV path peak-normalizes English and Mandarin to 0 dBFS and the scale
+/// factor cannot be recovered downstream. The caller owns the buffer and must
+/// free it with `fluidaudio_kokoro_free_samples`.
+@_cdecl("fluidaudio_kokoro_synthesize_samples")
+public func fluidaudio_kokoro_synthesize_samples(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ text: UnsafePointer<CChar>?,
+    _ voice: UnsafePointer<CChar>?,
+    _ speed: Float,
+    _ outSamples: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    _ outCount: UnsafeMutablePointer<UInt>?,
+    _ outSampleRate: UnsafeMutablePointer<UInt32>?
+) -> Int32 {
+    // Every output pointer is required: without them the caller can neither
+    // receive the buffer nor interpret it, and allocating anyway would leak.
+    guard let ptr = ptr, let text = text, let outSamples = outSamples, let outCount = outCount,
+        let outSampleRate = outSampleRate
+    else {
+        return KokoroStatus.failed
+    }
+    outSamples.pointee = nil
+    outCount.pointee = 0
+    outSampleRate.pointee = 0
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    let textString = String(cString: text)
+    let voiceString = voice.map { String(cString: $0) } ?? "af_heart"
+    do {
+        let (samples, sampleRate) = try bridge.synthesizeKokoroSamples(
+            text: textString, voice: voiceString, speed: speed)
+        // `allocate(capacity: 0)` is legal but its pointer must never be written
+        // through, so the copy is guarded on a real base address instead.
+        let buf = UnsafeMutablePointer<Float>.allocate(capacity: max(samples.count, 1))
+        samples.withUnsafeBufferPointer { src in
+            if let base = src.baseAddress {
+                buf.update(from: base, count: src.count)
+            }
+        }
+        outSamples.pointee = buf
+        outCount.pointee = UInt(samples.count)
+        outSampleRate.pointee = UInt32(sampleRate)
+        return KokoroStatus.ok
+    } catch {
+        return kokoroFailure("Kokoro synthesize error", error)
+    }
+}
+
+@_cdecl("fluidaudio_kokoro_free_samples")
+public func fluidaudio_kokoro_free_samples(_ p: UnsafeMutablePointer<Float>?) {
+    p?.deallocate()
+}
+
 @_cdecl("fluidaudio_is_kokoro_available")
 public func fluidaudio_is_kokoro_available(_ ptr: UnsafeMutableRawPointer?) -> Int32 {
     guard let ptr = ptr else { return 0 }

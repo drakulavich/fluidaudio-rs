@@ -732,6 +732,28 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    /// [`Self::synthesize_kokoro`] one step earlier in the chain: the raw fp32
+    /// samples and their rate (24 kHz), before FluidAudio's WAV wrapper.
+    ///
+    /// That wrapper peak-normalizes every KokoroAne variant except Japanese to
+    /// 0 dBFS, and the scale factor is not recoverable from the WAV — so this is
+    /// the only way to get English and Mandarin at the model's native level.
+    /// Samples can exceed ±1.0; a caller writing them to a fixed-point format
+    /// has to clamp.
+    ///
+    /// # Returns
+    /// * `(Vec<f32>, u32)` - mono samples and their sample rate
+    pub fn synthesize_kokoro_samples(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<(Vec<f32>, u32), FluidAudioError> {
+        self.bridge
+            .kokoro_synthesize_samples(text, voice, speed)
+            .map_err(FluidAudioError::from)
+    }
+
     /// Check if Kokoro TTS is initialized and ready.
     pub fn is_kokoro_available(&self) -> bool {
         self.bridge.is_kokoro_available()

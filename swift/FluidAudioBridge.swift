@@ -245,6 +245,47 @@ class FluidAudioBridgeInternal {
         return data
     }
 
+    /// Synthesize `text` and return the chain's raw fp32 samples plus their rate.
+    ///
+    /// `synthesizeKokoro` goes through `KokoroAneManager.synthesize`, whose WAV
+    /// wrapper peak-normalizes every variant except Japanese to 0 dBFS; the scale
+    /// factor is not recoverable afterwards. `synthesizeDetailed` is the same
+    /// synthesis one step earlier, so a caller wanting the model's native level
+    /// has to take the samples.
+    func synthesizeKokoroSamples(text: String, voice: String, speed: Float) throws -> (
+        samples: [Float], sampleRate: Int
+    ) {
+        guard let manager = kokoroManager else {
+            throw BridgeError.notInitialized
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: KokoroAneSynthesisResult?
+        var synthError: Error?
+
+        Task {
+            do {
+                result = try await manager.synthesizeDetailed(
+                    text: text, voice: voice, speed: speed)
+            } catch {
+                synthError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+
+        if let error = synthError {
+            throw error
+        }
+
+        guard let result = result else {
+            throw BridgeError.noResult
+        }
+
+        return (result.samples, result.sampleRate)
+    }
+
     func isKokoroAvailable() -> Bool {
         return kokoroManager != nil
     }
