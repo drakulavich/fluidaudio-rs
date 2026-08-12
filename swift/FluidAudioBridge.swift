@@ -82,7 +82,7 @@ class FluidAudioBridgeInternal {
         }
     }
 
-    func transcribeFile(_ path: String) throws -> (String, Float, Double, Double, Float) {
+    func transcribeFile(_ path: String) throws -> ASRResult {
         // One-shot transcription: each call starts with a fresh decoder state so
         // results don't leak across utterances. The TDT decoder's LSTM hidden/cell
         // state and `lastToken` would otherwise persist, biasing the next call's
@@ -119,10 +119,10 @@ class FluidAudioBridgeInternal {
             throw BridgeError.noResult
         }
 
-        return (r.text, r.confidence, r.duration, r.processingTime, r.rtfx)
+        return r
     }
 
-    func transcribeSamples(_ samples: [Float]) throws -> (String, Float, Double, Double, Float) {
+    func transcribeSamples(_ samples: [Float]) throws -> ASRResult {
         // See `transcribeFile` for the rationale: fresh decoder state per call.
         guard let manager = asrManager else {
             throw BridgeError.notInitialized
@@ -152,7 +152,7 @@ class FluidAudioBridgeInternal {
             throw BridgeError.noResult
         }
 
-        return (r.text, r.confidence, r.duration, r.processingTime, r.rtfx)
+        return r
     }
 
     func isAsrAvailable() -> Bool {
@@ -965,22 +965,68 @@ public func fluidaudio_transcribe_file(
     let pathString = String(cString: path)
 
     do {
-        let (text, confidence, duration, processingTime, rtfx) = try bridge.transcribeFile(pathString)
-
-        // Allocate and copy text
-        if let outText = outText {
-            let cString = strdup(text)
-            outText.pointee = cString
-        }
-
-        outConfidence?.pointee = confidence
-        outDuration?.pointee = duration
-        outProcessingTime?.pointee = processingTime
-        outRtfx?.pointee = rtfx
-
+        let result = try bridge.transcribeFile(pathString)
+        emitAsrScalars(
+            result,
+            outText: outText,
+            outConfidence: outConfidence,
+            outDuration: outDuration,
+            outProcessingTime: outProcessingTime,
+            outRtfx: outRtfx
+        )
         return 0
     } catch {
         print("Transcribe error: \(error)")
+        return -1
+    }
+}
+
+/// As `fluidaudio_transcribe_file`, plus the per-word timings FluidAudio already
+/// computes and this bridge used to discard.
+///
+/// A sibling symbol rather than more out-params on the original: the arity of a
+/// `@_cdecl` export is its ABI, and callers pinned to the old one must keep
+/// linking. `outWords`/`outWordStarts`/`outWordEnds` are parallel arrays of
+/// `outWordCount` entries, freed together by `fluidaudio_free_word_timings`.
+/// A model that returns no token timings yields count 0 and null arrays, which is
+/// not an error — it is how a caller learns this audio produced none.
+@_cdecl("fluidaudio_transcribe_file_with_words")
+public func fluidaudio_transcribe_file_with_words(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ path: UnsafePointer<CChar>?,
+    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?,
+    _ outConfidence: UnsafeMutablePointer<Float>?,
+    _ outDuration: UnsafeMutablePointer<Double>?,
+    _ outProcessingTime: UnsafeMutablePointer<Double>?,
+    _ outRtfx: UnsafeMutablePointer<Float>?,
+    _ outWords: UnsafeMutablePointer<UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?>?,
+    _ outWordStarts: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    _ outWordEnds: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    _ outWordCount: UnsafeMutablePointer<UInt32>?
+) -> Int32 {
+    guard let ptr = ptr, let path = path else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+
+    do {
+        let result = try bridge.transcribeFile(String(cString: path))
+        emitAsrScalars(
+            result,
+            outText: outText,
+            outConfidence: outConfidence,
+            outDuration: outDuration,
+            outProcessingTime: outProcessingTime,
+            outRtfx: outRtfx
+        )
+        emitWordTimings(
+            buildWordTimings(from: result.tokenTimings ?? []),
+            outWords: outWords,
+            outStartTimes: outWordStarts,
+            outEndTimes: outWordEnds,
+            outCount: outWordCount
+        )
+        return 0
+    } catch {
+        print("Transcribe with words error: \(error)")
         return -1
     }
 }
@@ -1002,24 +1048,137 @@ public func fluidaudio_transcribe_samples(
     let samplesArray = Array(UnsafeBufferPointer(start: samples, count: Int(sampleCount)))
 
     do {
-        let (text, confidence, duration, processingTime, rtfx) = try bridge.transcribeSamples(samplesArray)
-
-        // Allocate and copy text
-        if let outText = outText {
-            let cString = strdup(text)
-            outText.pointee = cString
-        }
-
-        outConfidence?.pointee = confidence
-        outDuration?.pointee = duration
-        outProcessingTime?.pointee = processingTime
-        outRtfx?.pointee = rtfx
-
+        let result = try bridge.transcribeSamples(samplesArray)
+        emitAsrScalars(
+            result,
+            outText: outText,
+            outConfidence: outConfidence,
+            outDuration: outDuration,
+            outProcessingTime: outProcessingTime,
+            outRtfx: outRtfx
+        )
         return 0
     } catch {
         print("Transcribe samples error: \(error)")
         return -1
     }
+}
+
+/// `fluidaudio_transcribe_samples` with word timings; see
+/// `fluidaudio_transcribe_file_with_words` for the output contract.
+@_cdecl("fluidaudio_transcribe_samples_with_words")
+public func fluidaudio_transcribe_samples_with_words(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ samples: UnsafePointer<Float>?,
+    _ sampleCount: UInt32,
+    _ outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?,
+    _ outConfidence: UnsafeMutablePointer<Float>?,
+    _ outDuration: UnsafeMutablePointer<Double>?,
+    _ outProcessingTime: UnsafeMutablePointer<Double>?,
+    _ outRtfx: UnsafeMutablePointer<Float>?,
+    _ outWords: UnsafeMutablePointer<UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?>?,
+    _ outWordStarts: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    _ outWordEnds: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    _ outWordCount: UnsafeMutablePointer<UInt32>?
+) -> Int32 {
+    guard let ptr = ptr, let samples = samples else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+
+    let samplesArray = Array(UnsafeBufferPointer(start: samples, count: Int(sampleCount)))
+
+    do {
+        let result = try bridge.transcribeSamples(samplesArray)
+        emitAsrScalars(
+            result,
+            outText: outText,
+            outConfidence: outConfidence,
+            outDuration: outDuration,
+            outProcessingTime: outProcessingTime,
+            outRtfx: outRtfx
+        )
+        emitWordTimings(
+            buildWordTimings(from: result.tokenTimings ?? []),
+            outWords: outWords,
+            outStartTimes: outWordStarts,
+            outEndTimes: outWordEnds,
+            outCount: outWordCount
+        )
+        return 0
+    } catch {
+        print("Transcribe samples with words error: \(error)")
+        return -1
+    }
+}
+
+/// Copy the scalar half of an `ASRResult` into the out-params both transcribe
+/// symbols share. `outText` is `strdup`ed and freed by `fluidaudio_free_string`.
+func emitAsrScalars(
+    _ result: ASRResult,
+    outText: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?,
+    outConfidence: UnsafeMutablePointer<Float>?,
+    outDuration: UnsafeMutablePointer<Double>?,
+    outProcessingTime: UnsafeMutablePointer<Double>?,
+    outRtfx: UnsafeMutablePointer<Float>?
+) {
+    outText?.pointee = strdup(result.text)
+    outConfidence?.pointee = result.confidence
+    outDuration?.pointee = result.duration
+    outProcessingTime?.pointee = result.processingTime
+    outRtfx?.pointee = result.rtfx
+}
+
+/// Marshal `[WordTiming]` into parallel C arrays, mirroring
+/// `emitDiarizationSegments`. Times narrow from `TimeInterval` to `Float`: they
+/// are seconds off an 0.08 s frame grid, where f32 has ~7 significant digits.
+func emitWordTimings(
+    _ words: [WordTiming],
+    outWords: UnsafeMutablePointer<UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?>?,
+    outStartTimes: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    outEndTimes: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>?,
+    outCount: UnsafeMutablePointer<UInt32>?
+) {
+    let count = words.count
+    outCount?.pointee = UInt32(count)
+
+    if count == 0 {
+        outWords?.pointee = nil
+        outStartTimes?.pointee = nil
+        outEndTimes?.pointee = nil
+        return
+    }
+
+    let texts = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: count)
+    let starts = UnsafeMutablePointer<Float>.allocate(capacity: count)
+    let ends = UnsafeMutablePointer<Float>.allocate(capacity: count)
+
+    for (i, word) in words.enumerated() {
+        texts[i] = strdup(word.word)
+        starts[i] = Float(word.startTime)
+        ends[i] = Float(word.endTime)
+    }
+
+    outWords?.pointee = texts
+    outStartTimes?.pointee = starts
+    outEndTimes?.pointee = ends
+}
+
+/// Free what `fluidaudio_transcribe_*_with_words` handed out. Null-safe, and
+/// `count` must be the one that call reported.
+@_cdecl("fluidaudio_free_word_timings")
+public func fluidaudio_free_word_timings(
+    _ words: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?,
+    _ startTimes: UnsafeMutablePointer<Float>?,
+    _ endTimes: UnsafeMutablePointer<Float>?,
+    _ count: UInt32
+) {
+    if let words = words {
+        for i in 0..<Int(count) {
+            free(words[i])
+        }
+        words.deallocate()
+    }
+    startTimes?.deallocate()
+    endTimes?.deallocate()
 }
 
 @_cdecl("fluidaudio_is_asr_available")

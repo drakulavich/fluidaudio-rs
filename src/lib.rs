@@ -39,7 +39,7 @@ use thiserror::Error;
 
 // Re-export FFI types
 pub use ffi::{
-    AsrResult, DiarizationSegment, DiarizeCancelToken, DiarizeEvent, DiarizeOutcome,
+    AsrResult, AsrWordTiming, DiarizationSegment, DiarizeCancelToken, DiarizeEvent, DiarizeOutcome,
     DiarizeProgress, SystemInfo, VadFrame,
 };
 
@@ -330,6 +330,46 @@ impl FluidAudio {
     pub fn transcribe_samples(&self, samples: &[f32]) -> Result<AsrResult, FluidAudioError> {
         self.bridge
             .transcribe_samples(samples)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Transcribe an audio file, keeping the per-word timings the TDT decoder
+    /// already computes and [`transcribe_file`](Self::transcribe_file) drops.
+    ///
+    /// Words are grouped from the model's token timings by FluidAudio's own
+    /// `buildWordTimings`, so boundaries match the library's semantics rather
+    /// than a reimplementation of them. Same decode, same text — this costs one
+    /// extra marshalling pass, not another inference.
+    ///
+    /// # Returns
+    /// * `(AsrResult, Vec<AsrWordTiming>)` — the usual result plus one entry per
+    ///   word. The vector is empty when the model reported no token timings.
+    pub fn transcribe_file_with_words<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<(AsrResult, Vec<AsrWordTiming>), FluidAudioError> {
+        let path_str = path.as_ref().to_string_lossy();
+
+        if !path.as_ref().exists() {
+            return Err(FluidAudioError::FileNotFound(path_str.to_string()));
+        }
+
+        self.bridge
+            .transcribe_file_with_words(&path_str)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// [`transcribe_samples`](Self::transcribe_samples) with word timings; see
+    /// [`transcribe_file_with_words`](Self::transcribe_file_with_words).
+    ///
+    /// Times are relative to the samples handed in, so a caller feeding slices
+    /// of a longer file owns the offset back onto the file's clock.
+    pub fn transcribe_samples_with_words(
+        &self,
+        samples: &[f32],
+    ) -> Result<(AsrResult, Vec<AsrWordTiming>), FluidAudioError> {
+        self.bridge
+            .transcribe_samples_with_words(samples)
             .map_err(FluidAudioError::from)
     }
 

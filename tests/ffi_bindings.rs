@@ -139,9 +139,25 @@ fn missing_file_returns_file_not_found() {
     assert!(matches!(err, FluidAudioError::FileNotFound(_)));
 
     let err = audio
+        .transcribe_file_with_words("/this/path/definitely/does/not/exist.wav")
+        .expect_err("transcribe_file_with_words with missing path must error");
+    assert!(matches!(err, FluidAudioError::FileNotFound(_)));
+
+    let err = audio
         .diarize_file("/this/path/definitely/does/not/exist.wav")
         .expect_err("diarize_file with missing path must error");
     assert!(matches!(err, FluidAudioError::FileNotFound(_)));
+}
+
+/// The words path allocates two buffers in Swift before it can fail. Calling it
+/// before `init_asr` must come back as an `Err` rather than a crash — the error
+/// arm frees what was handed over, so a caller that retries does not leak.
+#[test]
+fn word_timings_before_asr_init_error_instead_of_crashing() {
+    let audio = FluidAudio::new().expect("bridge creation");
+    assert!(audio
+        .transcribe_samples_with_words(&[0.0_f32; 16_000])
+        .is_err());
 }
 
 /// Calling streaming ASR session methods before initializing must surface a
@@ -318,6 +334,47 @@ fn asr_transcribe_file_is_stateless_across_calls() {
          between calls.",
         first.text, second.text,
     );
+}
+
+/// The reason this entry point exists: the TDT decoder times every token it
+/// emits and `transcribe_file` throws those away. The contract a consumer builds
+/// on is that the words partition the transcript — one entry per
+/// whitespace-separated word, in order, inside the clip — because a consumer
+/// that has to re-align words to text by string matching gains nothing over
+/// interpolating, which is what this replaces.
+#[test]
+#[ignore = "downloads Parakeet TDT models (~600MB) and triggers ANE compilation"]
+fn word_timings_line_up_with_the_transcript_they_came_from() {
+    let audio = FluidAudio::new().expect("bridge creation");
+    audio.init_asr().expect("ASR init");
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.wav");
+    let (result, words) = audio
+        .transcribe_file_with_words(&fixture)
+        .expect("transcribe with words");
+
+    assert!(!words.is_empty(), "real speech produced no words");
+    let spoken: Vec<&str> = result.text.split_whitespace().collect();
+    assert_eq!(
+        words.iter().map(|w| w.word.as_str()).collect::<Vec<_>>(),
+        spoken,
+        "words must be the transcript's own words, in order"
+    );
+
+    let mut previous_start = f32::NEG_INFINITY;
+    for word in &words {
+        assert!(
+            word.start >= previous_start,
+            "word starts went backwards at {word:?}"
+        );
+        assert!(word.end >= word.start, "{word:?} ends before it starts");
+        assert!(
+            word.start >= 0.0 && word.end <= result.duration as f32 + 0.5,
+            "{word:?} falls outside the {}s clip",
+            result.duration
+        );
+        previous_start = word.start;
+    }
 }
 
 /// A bridge can be rooted at a caller-owned directory. Creation alone downloads

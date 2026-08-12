@@ -37,6 +37,39 @@ extern "C" {
         out_processing_time: *mut f64,
         out_rtfx: *mut f32,
     ) -> i32;
+    fn fluidaudio_transcribe_file_with_words(
+        bridge: *mut std::ffi::c_void,
+        path: *const i8,
+        out_text: *mut *mut i8,
+        out_confidence: *mut f32,
+        out_duration: *mut f64,
+        out_processing_time: *mut f64,
+        out_rtfx: *mut f32,
+        out_words: *mut *mut *mut i8,
+        out_word_starts: *mut *mut f32,
+        out_word_ends: *mut *mut f32,
+        out_word_count: *mut u32,
+    ) -> i32;
+    fn fluidaudio_transcribe_samples_with_words(
+        bridge: *mut std::ffi::c_void,
+        samples: *const f32,
+        sample_count: u32,
+        out_text: *mut *mut i8,
+        out_confidence: *mut f32,
+        out_duration: *mut f64,
+        out_processing_time: *mut f64,
+        out_rtfx: *mut f32,
+        out_words: *mut *mut *mut i8,
+        out_word_starts: *mut *mut f32,
+        out_word_ends: *mut *mut f32,
+        out_word_count: *mut u32,
+    ) -> i32;
+    fn fluidaudio_free_word_timings(
+        words: *mut *mut i8,
+        start_times: *mut f32,
+        end_times: *mut f32,
+        count: u32,
+    );
 
     // Streaming ASR
     fn fluidaudio_initialize_streaming_asr(bridge: *mut std::ffi::c_void) -> i32;
@@ -837,6 +870,70 @@ impl FluidAudioBridge {
         })
     }
 
+    /// [`transcribe_file`](Self::transcribe_file) plus the per-word timings the
+    /// TDT decoder already computes. Words are grouped by FluidAudio's own
+    /// `buildWordTimings`, so their boundaries match the library's semantics.
+    /// An empty vector means this audio produced no token timings, not that the
+    /// build cannot produce them.
+    pub fn transcribe_file_with_words(
+        &self,
+        path: &str,
+    ) -> Result<(AsrResult, Vec<AsrWordTiming>), String> {
+        let c_path = CString::new(path).map_err(|_| "Invalid path")?;
+        let mut scalars = AsrScalars::default();
+        let mut words = WordTimingArrays::default();
+
+        let result = unsafe {
+            fluidaudio_transcribe_file_with_words(
+                self.ptr,
+                c_path.as_ptr(),
+                &mut scalars.text,
+                &mut scalars.confidence,
+                &mut scalars.duration,
+                &mut scalars.processing_time,
+                &mut scalars.rtfx,
+                &mut words.texts,
+                &mut words.starts,
+                &mut words.ends,
+                &mut words.count,
+            )
+        };
+
+        // SAFETY: both buffers came from the call above, which reports its own
+        // counts; on failure they are null and both collectors are null-safe.
+        unsafe { finish_transcribe_with_words(result, scalars, words) }
+    }
+
+    /// [`transcribe_samples`](Self::transcribe_samples) with word timings; see
+    /// [`transcribe_file_with_words`](Self::transcribe_file_with_words).
+    pub fn transcribe_samples_with_words(
+        &self,
+        samples: &[f32],
+    ) -> Result<(AsrResult, Vec<AsrWordTiming>), String> {
+        let mut scalars = AsrScalars::default();
+        let mut words = WordTimingArrays::default();
+
+        let result = unsafe {
+            fluidaudio_transcribe_samples_with_words(
+                self.ptr,
+                samples.as_ptr(),
+                samples.len() as u32,
+                &mut scalars.text,
+                &mut scalars.confidence,
+                &mut scalars.duration,
+                &mut scalars.processing_time,
+                &mut scalars.rtfx,
+                &mut words.texts,
+                &mut words.starts,
+                &mut words.ends,
+                &mut words.count,
+            )
+        };
+
+        // SAFETY: see `transcribe_file_with_words`.
+        unsafe { finish_transcribe_with_words(result, scalars, words) }
+    }
+
     pub fn is_asr_available(&self) -> bool {
         unsafe { fluidaudio_is_asr_available(self.ptr) != 0 }
     }
@@ -1152,6 +1249,95 @@ impl FluidAudioBridge {
     }
 }
 
+/// Out-params the two `*_with_words` symbols fill besides the words themselves.
+#[derive(Default)]
+struct AsrScalars {
+    text: *mut i8,
+    confidence: f32,
+    duration: f64,
+    processing_time: f64,
+    rtfx: f32,
+}
+
+/// The parallel word arrays a `*_with_words` call hands back, owned by Swift
+/// until [`collect_word_timings`] frees them.
+#[derive(Default)]
+struct WordTimingArrays {
+    texts: *mut *mut i8,
+    starts: *mut f32,
+    ends: *mut f32,
+    count: u32,
+}
+
+/// SAFETY: `scalars` and `words` must be exactly what the `*_with_words` call
+/// returning `status` filled in. Both are consumed here — the text and the word
+/// arrays are freed on every path, including the error one, so a failed call
+/// cannot leak a partially written result.
+unsafe fn finish_transcribe_with_words(
+    status: i32,
+    scalars: AsrScalars,
+    words: WordTimingArrays,
+) -> Result<(AsrResult, Vec<AsrWordTiming>), String> {
+    let text = take_text(scalars.text);
+    let words = collect_word_timings(words);
+    if status != 0 {
+        return Err("Transcription failed".to_string());
+    }
+    Ok((
+        AsrResult {
+            text,
+            confidence: scalars.confidence,
+            duration: scalars.duration,
+            processing_time: scalars.processing_time,
+            rtfx: scalars.rtfx,
+        },
+        words,
+    ))
+}
+
+/// SAFETY: `ptr` must be null or a `strdup`ed string owned by Swift; it is freed
+/// with `fluidaudio_free_string`.
+unsafe fn take_text(ptr: *mut i8) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+    fluidaudio_free_string(ptr);
+    text
+}
+
+/// SAFETY: the arrays must come from a `*_with_words` call with the matching
+/// `count`. They are freed via `fluidaudio_free_word_timings` before returning,
+/// including on the partial-null path, where the free function null-checks each.
+unsafe fn collect_word_timings(arrays: WordTimingArrays) -> Vec<AsrWordTiming> {
+    let WordTimingArrays {
+        texts,
+        starts,
+        ends,
+        count,
+    } = arrays;
+    let mut words = Vec::with_capacity(count as usize);
+
+    if count > 0 && !texts.is_null() && !starts.is_null() && !ends.is_null() {
+        for i in 0..count as usize {
+            let word_ptr = *texts.add(i);
+            let word = if word_ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(word_ptr).to_string_lossy().into_owned()
+            };
+            words.push(AsrWordTiming {
+                word,
+                start: *starts.add(i),
+                end: *ends.add(i),
+            });
+        }
+    }
+
+    fluidaudio_free_word_timings(texts, starts, ends, count);
+    words
+}
+
 /// SAFETY: caller must guarantee the four pointers came from a successful
 /// `fluidaudio_diarize_*` call with the matching `count`. The result arrays are
 /// freed via `fluidaudio_free_diarization_result` before returning — including on
@@ -1260,6 +1446,20 @@ pub struct AsrResult {
     pub duration: f64,
     pub processing_time: f64,
     pub rtfx: f32,
+}
+
+/// One word of a transcript, timed against the audio that produced it.
+///
+/// Times come off the encoder's frame grid (0.08 s on Parakeet TDT) and `end` is
+/// the decoder's own duration prediction rather than the next word's `start`, so
+/// consecutive spans may overlap and are not a partition. `word` is what the
+/// decoder emitted with punctuation attached, one entry per whitespace-separated
+/// word of [`AsrResult::text`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsrWordTiming {
+    pub word: String,
+    pub start: f32,
+    pub end: f32,
 }
 
 #[derive(Debug, Clone)]
