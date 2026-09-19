@@ -3,7 +3,7 @@
 //! Using manual FFI instead of swift-bridge to avoid complexity with Vec types.
 
 // Raw FFI functions - called directly from Rust, implemented in Swift
-#[link(name = "FluidAudioBridge")]
+#[link(name = "FluidAudioBridge", kind = "static", modifiers = "-bundle")]
 extern "C" {
     // Offline enforcement (process-global; upstream's flag is a static)
     fn fluidaudio_set_offline_mode(enabled: i32);

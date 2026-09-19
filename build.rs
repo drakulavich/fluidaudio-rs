@@ -37,7 +37,6 @@ fn main() {
 
     // Link the Swift library
     println!("cargo:rustc-link-search=native={}", lib_path.display());
-    println!("cargo:rustc-link-lib=static=FluidAudioBridge");
 
     // Link Apple frameworks
     println!("cargo:rustc-link-lib=framework=Foundation");
