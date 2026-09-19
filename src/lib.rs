@@ -96,7 +96,7 @@ impl From<ffi::KokoroError> for FluidAudioError {
 ///
 /// # Why this is two mechanisms
 ///
-/// Upstream's flag alone leaves a hole: at FluidAudio 0.15.5 `AssetDownloader`
+/// Upstream's flag alone leaves a hole: at FluidAudio 0.15.7 `AssetDownloader`
 /// uses the shared session and consults no flag, so `ensureVoicePack`,
 /// `ensureEnglishLexicon`, `ensureMandarinG2P`, `ensureMandarinJiebaHmm` and
 /// `ensureMandarinG2pw` would still reach the network. They all build their URLs
@@ -775,11 +775,10 @@ impl FluidAudio {
     /// [`Self::synthesize_kokoro`] one step earlier in the chain: the raw fp32
     /// samples and their rate (24 kHz), before FluidAudio's WAV wrapper.
     ///
-    /// That wrapper peak-normalizes every KokoroAne variant except Japanese to
-    /// 0 dBFS, and the scale factor is not recoverable from the WAV — so this is
-    /// the only way to get English and Mandarin at the model's native level.
-    /// Samples can exceed ±1.0; a caller writing them to a fixed-point format
-    /// has to clamp.
+    /// Since FluidAudio 0.15.7 that wrapper no longer peak-normalizes any
+    /// variant, so both paths carry the model's native level; this one keeps
+    /// the audio in f32 instead of 16-bit PCM. Samples can exceed ±1.0; a
+    /// caller writing them to a fixed-point format has to clamp.
     ///
     /// # Returns
     /// * `(Vec<f32>, u32)` - mono samples and their sample rate

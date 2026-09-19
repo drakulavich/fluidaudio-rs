@@ -486,10 +486,11 @@ fn samples_synthesis_without_kokoro_is_classified_not_initialized() {
     );
 }
 
-/// The reason this entry point exists: `synthesize_kokoro` hands back a WAV that
-/// `KokoroAneManager.wavData` peak-normalized to 0 dBFS for every variant but
-/// Japanese, and the scale factor is gone by then. The samples path must be the
-/// same audio *before* that slam — same duration, but not pinned to full scale.
+/// The contract this entry point was added for: the samples are the chain's
+/// native level, never pinned to full scale. Through FluidAudio 0.15.5 the WAV
+/// path (`KokoroAneManager.wavData`) slammed every variant but Japanese to
+/// 0 dBFS; 0.15.7 dropped that, and this guard keeps it from coming back on
+/// the samples path.
 ///
 /// Runs on CPU+GPU so it works where no ANE is exposed; downloads ~200 MB if
 /// Kokoro was never fetched.
@@ -510,7 +511,7 @@ fn samples_synthesis_is_not_peak_normalized() {
     let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
     assert!(
         peak > 0.0 && (peak - 1.0).abs() > 1e-3,
-        "English samples peaked at {peak}, which is the 0 dBFS slam this path exists to avoid"
+        "English samples peaked at {peak}: a 0 dBFS slam on the samples path"
     );
 
     // Same synthesis, so the WAV must carry the same number of frames — that is

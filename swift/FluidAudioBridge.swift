@@ -247,11 +247,9 @@ class FluidAudioBridgeInternal {
 
     /// Synthesize `text` and return the chain's raw fp32 samples plus their rate.
     ///
-    /// `synthesizeKokoro` goes through `KokoroAneManager.synthesize`, whose WAV
-    /// wrapper peak-normalizes every variant except Japanese to 0 dBFS; the scale
-    /// factor is not recoverable afterwards. `synthesizeDetailed` is the same
-    /// synthesis one step earlier, so a caller wanting the model's native level
-    /// has to take the samples.
+    /// `synthesizeDetailed` is `KokoroAneManager.synthesize` one step earlier,
+    /// before the 16-bit WAV wrapper. Since FluidAudio 0.15.7 that wrapper no
+    /// longer peak-normalizes any variant, so the two differ in format, not level.
     func synthesizeKokoroSamples(text: String, voice: String, speed: Float) throws -> (
         samples: [Float], sampleRate: Int
     ) {

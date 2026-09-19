@@ -122,7 +122,7 @@ public func fluidaudio_initialize_kokoro_with_compute_units(
 }
 
 /// Synthesize `text` with `voice` at `speed`; returns a complete WAV byte buffer
-/// (24 kHz mono 16-bit PCM (i16), peak-normalized) via `outBytes`/`outLen`. The caller owns the buffer and must
+/// (24 kHz mono 16-bit PCM (i16), at the model's native level) via `outBytes`/`outLen`. The caller owns the buffer and must
 /// free it with `fluidaudio_kokoro_free_bytes`.
 @_cdecl("fluidaudio_kokoro_synthesize")
 public func fluidaudio_kokoro_synthesize(
@@ -205,10 +205,11 @@ public func fluidaudio_kokoro_free_bytes(_ p: UnsafeMutablePointer<UInt8>?) {
 /// Synthesize `text` with `voice` at `speed`; returns the chain's raw fp32
 /// samples via `outSamples`/`outCount` and their rate via `outSampleRate`.
 ///
-/// Unlike `fluidaudio_kokoro_synthesize` these are at the model's native level:
-/// the WAV path peak-normalizes English and Mandarin to 0 dBFS and the scale
-/// factor cannot be recovered downstream. The caller owns the buffer and must
-/// free it with `fluidaudio_kokoro_free_samples`.
+/// Same audio as `fluidaudio_kokoro_synthesize` one step earlier in the chain:
+/// fp32 rather than the WAV path's 16-bit PCM. Since FluidAudio 0.15.7 both
+/// paths sit at the model's native level (the WAV wrapper no longer
+/// peak-normalizes). The caller owns the buffer and must free it with
+/// `fluidaudio_kokoro_free_samples`.
 @_cdecl("fluidaudio_kokoro_synthesize_samples")
 public func fluidaudio_kokoro_synthesize_samples(
     _ ptr: UnsafeMutableRawPointer?,

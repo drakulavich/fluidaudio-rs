@@ -28,7 +28,7 @@ nonisolated(unsafe) private var registryBaseBeforeOffline: String?
 ///    retry-with-redownload throw `DownloadError.networkDisabled` /
 ///    `.modelMissing` instead of reaching HuggingFace.
 /// 2. `ModelRegistry.baseURL`, repointed at an unresolvable scheme. At
-///    FluidAudio 0.15.5 `AssetDownloader` talks to the shared `URLSession` and
+///    FluidAudio 0.15.7 `AssetDownloader` talks to the shared `URLSession` and
 ///    consults no flag, so `ensureVoicePack`, `ensureEnglishLexicon`,
 ///    `ensureMandarinG2P`, `ensureMandarinJiebaHmm` and `ensureMandarinG2pw`
 ///    would still hit the network with (1) alone. Every one of them builds its

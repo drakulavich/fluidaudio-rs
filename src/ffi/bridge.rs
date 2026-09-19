@@ -529,7 +529,7 @@ impl FluidAudioBridge {
     }
 
     /// Synthesize `text` with `voice` at `speed`; returns the complete WAV bytes
-    /// produced by FluidAudio's KokoroAneManager (24 kHz mono 16-bit PCM (i16), peak-normalized).
+    /// produced by FluidAudio's KokoroAneManager (24 kHz mono 16-bit PCM (i16), at the model's native level).
     pub fn kokoro_synthesize(
         &self,
         text: &str,
