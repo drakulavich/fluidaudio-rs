@@ -247,14 +247,9 @@ class FluidAudioBridgeInternal {
 
     /// Synthesize `text` and return the chain's raw fp32 samples plus their rate.
     ///
-    /// `KokoroAneManager.synthesizeDetailed` — `synthesize` one step earlier,
-    /// before the 16-bit WAV wrapper, which since FluidAudio 0.15.7 no longer
-    /// peak-normalizes any variant, so the two differ in format, not level —
-    /// plus the chunking it had at 0.15.5 (FluidAudio #712) until #790 dropped
-    /// it: phonemes past `KokoroAneConstants.maxPhonemeLength` are split at the
-    /// latest whitespace or pause punctuation, synthesized one chunk at a time
-    /// and concatenated, where the library now throws `phonemeSequenceTooLong`.
-    /// Text that fits takes `synthesizeDetailed`'s own path, unchanged.
+    /// `synthesizeDetailed` is `KokoroAneManager.synthesize` one step earlier,
+    /// before the 16-bit WAV wrapper. Since FluidAudio 0.15.7 that wrapper no
+    /// longer peak-normalizes any variant, so the two differ in format, not level.
     func synthesizeKokoroSamples(text: String, voice: String, speed: Float) throws -> (
         samples: [Float], sampleRate: Int
     ) {
@@ -263,25 +258,13 @@ class FluidAudioBridgeInternal {
         }
 
         let semaphore = DispatchSemaphore(value: 0)
-        var result: (samples: [Float], sampleRate: Int)?
+        var result: KokoroAneSynthesisResult?
         var synthError: Error?
 
         Task {
             do {
-                let phonemes = try await manager.phonemes(for: text)
-                let chunks = Self.chunkPhonemes(
-                    phonemes, maxLength: KokoroAneConstants.maxPhonemeLength)
-                // 0.15.5's guard: anything the chunker does not split runs as resolved, untrimmed.
-                let pieces = chunks.count > 1 ? chunks : [phonemes]
-                var samples: [Float] = []
-                var sampleRate = KokoroAneConstants.sampleRate
-                for chunk in pieces {
-                    let chunkResult = try await manager.synthesizeFromPhonemesDetailed(
-                        chunk, voice: voice, speed: speed)
-                    samples.append(contentsOf: chunkResult.samples)
-                    sampleRate = chunkResult.sampleRate
-                }
-                result = (samples, sampleRate)
+                result = try await manager.synthesizeDetailed(
+                    text: text, voice: voice, speed: speed)
             } catch {
                 synthError = error
             }
@@ -298,58 +281,7 @@ class FluidAudioBridgeInternal {
             throw BridgeError.noResult
         }
 
-        return result
-    }
-
-    /// Pause punctuation the Kokoro vocabularies encode as their own tokens;
-    /// breaking right after one keeps the clause with the chunk it ends.
-    private static let phonemeBoundaryPunctuation: Set<Character> = [
-        ",", ".", ";", ":", "!", "?", "…", "—",
-    ]
-
-    /// FluidAudio's `PhonemeChunker.chunk` (0.15.5), which is internal to the
-    /// library and so copied here: input within the cap comes back trimmed as
-    /// one chunk (none when blank); otherwise break at the latest boundary
-    /// inside each `maxLength` window, hard-split a run with none, trim every chunk.
-    private static func chunkPhonemes(_ phonemes: String, maxLength: Int) -> [String] {
-        let characters = Array(phonemes)
-        if characters.isEmpty { return [] }
-        if characters.count <= maxLength {
-            let trimmed = phonemes.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? [] : [trimmed]
-        }
-
-        var chunks: [String] = []
-        var start = 0
-
-        func isBoundary(_ character: Character) -> Bool {
-            character.isWhitespace || phonemeBoundaryPunctuation.contains(character)
-        }
-        func appendChunk(_ slice: ArraySlice<Character>) {
-            let text = String(slice).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty { chunks.append(text) }
-        }
-
-        while start < characters.count, characters[start].isWhitespace { start += 1 }
-        while characters.count - start > maxLength {
-            let windowEnd = start + maxLength
-            var breakAt = windowEnd
-            var index = windowEnd - 1
-            while index > start {
-                if isBoundary(characters[index]) {
-                    breakAt = index + 1
-                    break
-                }
-                index -= 1
-            }
-            appendChunk(characters[start..<breakAt])
-            start = breakAt
-            while start < characters.count, characters[start].isWhitespace { start += 1 }
-        }
-        if start < characters.count {
-            appendChunk(characters[start..<characters.count])
-        }
-        return chunks
+        return (result.samples, result.sampleRate)
     }
 
     func isKokoroAvailable() -> Bool {
